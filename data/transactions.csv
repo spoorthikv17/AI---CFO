@@ -1,0 +1,13 @@
+date,description,category,type,amount
+2026-01-02,Office Rent,Office,Expense,25000
+2026-01-03,Product Sale,Sales,Income,45000
+2026-01-05,Electricity Bill,Utilities,Expense,4500
+2026-01-08,Product Sale,Sales,Income,38000
+2026-01-10,Employee Salary,Salaries,Expense,30000
+2026-01-12,Software Subscription,Software,Expense,2500
+2026-01-15,Product Sale,Sales,Income,52000
+2026-01-18,Internet Bill,Utilities,Expense,1800
+2026-01-20,Product Sale,Sales,Income,41000
+2026-01-25,Marketing Campaign,Marketing,Expense,8000
+2026-01-27,Product Sale,Sales,Income,47000
+2026-01-30,Office Supplies,Office,Expense,3200
