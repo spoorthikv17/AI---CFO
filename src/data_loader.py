@@ -1,13 +1,45 @@
 import pandas as pd
+
 from financial_analysis import (
     calculate_financial_summary,
-    calculate_monthly_summary
+    calculate_monthly_summary,
+    calculate_expense_by_category
 )
 
-# Load financial transaction data
+
+def load_and_clean_data(file_path):
+    """Load and clean financial transaction data."""
+
+    transactions = pd.read_csv(file_path)
+
+    # Convert date to datetime
+    transactions["date"] = pd.to_datetime(
+        transactions["date"],
+        errors="coerce"
+    )
+
+    # Remove duplicate transactions
+    transactions = transactions.drop_duplicates()
+
+    # Remove rows with missing required values
+    required_columns = [
+        "date",
+        "description",
+        "category",
+        "type",
+        "amount"
+    ]
+
+    transactions = transactions.dropna(
+        subset=required_columns
+    )
+
+    return transactions
+
+
+# Load and clean the data
 file_path = "data/transactions.csv"
-transactions = pd.read_csv(file_path)
-transactions["date"] = pd.to_datetime(transactions["date"])
+transactions = load_and_clean_data(file_path)
 
 # Validate transaction types
 valid_types = ["Income", "Expense"]
@@ -26,6 +58,16 @@ if transactions[required_columns].isnull().any().any():
     raise ValueError("Missing values found in required fields.")
 
 print("\nData validation passed successfully.")
+
+# Check for invalid dates
+if transactions["date"].isnull().any():
+    raise ValueError("Invalid date found.")
+
+# Check for zero or negative amounts
+if (transactions["amount"] <= 0).any():
+    raise ValueError("Invalid transaction amount found.")
+
+print("Data quality checks passed successfully.")
 
 # Calculate financial summary
 summary = calculate_financial_summary(transactions)
@@ -50,3 +92,8 @@ monthly_summary = calculate_monthly_summary(transactions)
 
 print("\n===== Monthly Financial Summary =====")
 print(monthly_summary)
+# Calculate expense breakdown by category
+expense_by_category = calculate_expense_by_category(transactions)
+
+print("\n===== Expense by Category =====")
+print(expense_by_category)

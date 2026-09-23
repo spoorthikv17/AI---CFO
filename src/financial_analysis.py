@@ -33,3 +33,26 @@ def calculate_monthly_summary(transactions):
     )
 
     return monthly
+def calculate_expense_by_category(transactions):
+    """Calculate expenses and their percentage by category."""
+
+    expenses = transactions[
+        transactions["type"] == "Expense"
+    ]
+
+    category_summary = (
+        expenses.groupby("category")["amount"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    total_expenses = category_summary.sum()
+
+    category_percentage = (
+        category_summary / total_expenses * 100
+    )
+
+    result = category_summary.to_frame(name="amount")
+    result["percentage"] = category_percentage.round(2)
+
+    return result
