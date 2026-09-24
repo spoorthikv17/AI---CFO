@@ -3,7 +3,8 @@ import pandas as pd
 
 from financial_analysis import (
     calculate_financial_summary,
-    calculate_profit_margin
+    calculate_profit_margin,
+     calculate_cash_flow
 )
 
 def connect_to_database(db_path):
@@ -76,3 +77,8 @@ print(f"Total Income   : ₹{summary['total_income']:,.2f}")
 print(f"Total Expenses : ₹{summary['total_expenses']:,.2f}")
 print(f"Profit         : ₹{summary['profit']:,.2f}")
 print(f"Profit Margin  : {profit_margin:.2f}%")
+
+cash_flow = calculate_cash_flow(database_transactions)
+
+print("\n===== Cash Flow Analysis =====")
+print(cash_flow)

@@ -74,3 +74,21 @@ if __name__ == "__main__":
     )
 
     print(f"Profit Margin: {profit_margin:.2f}%")
+
+def calculate_cash_flow(transactions):
+    """Calculate cash inflow, outflow, and net cash flow."""
+
+    cash_flow = (
+        transactions
+        .assign(month=transactions["date"].dt.to_period("M"))
+        .groupby(["month", "type"])["amount"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+
+    cash_flow["Net Cash Flow"] = (
+        cash_flow.get("Income", 0)
+        - cash_flow.get("Expense", 0)
+    )
+
+    return cash_flow
