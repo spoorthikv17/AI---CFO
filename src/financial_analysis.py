@@ -107,3 +107,10 @@ def identify_largest_expense(expense_by_category):
         "category": largest_category,
         "amount": largest_amount
     }
+def calculate_expense_ratio(total_income, total_expenses):
+    """Calculate expenses as a percentage of income."""
+
+    if total_income == 0:
+        return 0
+
+    return (total_expenses / total_income) * 100

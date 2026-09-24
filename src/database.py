@@ -6,7 +6,8 @@ from financial_analysis import (
     calculate_profit_margin,
     calculate_cash_flow,
     calculate_expense_by_category,
-    identify_largest_expense
+    identify_largest_expense,
+    calculate_expense_ratio
 )
 
 def connect_to_database(db_path):
@@ -95,3 +96,10 @@ largest_expense = identify_largest_expense(
 print("\n===== Largest Expense =====")
 print(f"Category : {largest_expense['category']}")
 print(f"Amount   : ₹{largest_expense['amount']:,.2f}")
+expense_ratio = calculate_expense_ratio(
+    summary["total_income"],
+    summary["total_expenses"]
+)
+
+print("\n===== Financial Health =====")
+print(f"Expense Ratio : {expense_ratio:.2f}%")
