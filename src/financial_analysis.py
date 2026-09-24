@@ -114,3 +114,97 @@ def calculate_expense_ratio(total_income, total_expenses):
         return 0
 
     return (total_expenses / total_income) * 100
+def calculate_financial_trend(transactions):
+    """Calculate monthly income, expenses, profit, and profit margin."""
+
+    monthly = (
+        transactions
+        .assign(month=transactions["date"].dt.to_period("M"))
+        .groupby(["month", "type"])["amount"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+
+    monthly["Profit"] = (
+        monthly.get("Income", 0)
+        - monthly.get("Expense", 0)
+    )
+
+    monthly["Profit Margin"] = (
+        monthly["Profit"]
+        / monthly.get("Income", 0)
+        * 100
+    )
+
+    monthly["Profit Margin"] = monthly["Profit Margin"].fillna(0).round(2)
+
+    return monthly
+def generate_financial_insights(
+    summary,
+    profit_margin,
+    expense_ratio,
+    largest_expense
+):
+    """Generate basic CFO-style financial insights."""
+
+    insights = []
+
+    insights.append(
+        f"Total income is ₹{summary['total_income']:,.2f}."
+    )
+
+    insights.append(
+        f"Total expenses are ₹{summary['total_expenses']:,.2f}."
+    )
+
+    insights.append(
+        f"Current profit is ₹{summary['profit']:,.2f}."
+    )
+
+    insights.append(
+        f"Profit margin is {profit_margin:.2f}%."
+    )
+
+    insights.append(
+        f"Expenses represent {expense_ratio:.2f}% of total income."
+    )
+
+    insights.append(
+        f"Largest expense category is "
+        f"{largest_expense['category']} "
+        f"at ₹{largest_expense['amount']:,.2f}."
+    )
+
+    return insights
+def generate_financial_alerts(
+    profit_margin,
+    expense_ratio,
+    largest_expense
+):
+    """Generate basic financial alerts."""
+
+    alerts = []
+
+    if profit_margin < 10:
+        alerts.append(
+            "Profit margin is low. Review expenses and pricing."
+        )
+
+    if expense_ratio > 80:
+        alerts.append(
+            "Expenses are high compared to income. "
+            "Review major spending categories."
+        )
+
+    if largest_expense["amount"] > 0:
+        alerts.append(
+            f"{ largest_expense['category']} expenses, "
+            f" currently at ₹{largest_expense['amount']:,.2f}."
+        )
+
+    if not alerts:
+        alerts.append(
+            "No immediate financial alerts detected."
+        )
+
+    return alerts

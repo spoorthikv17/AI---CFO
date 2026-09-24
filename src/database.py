@@ -7,7 +7,10 @@ from financial_analysis import (
     calculate_cash_flow,
     calculate_expense_by_category,
     identify_largest_expense,
-    calculate_expense_ratio
+    calculate_expense_ratio,
+    calculate_financial_trend,
+    generate_financial_insights,
+    generate_financial_alerts
 )
 
 def connect_to_database(db_path):
@@ -103,3 +106,31 @@ expense_ratio = calculate_expense_ratio(
 
 print("\n===== Financial Health =====")
 print(f"Expense Ratio : {expense_ratio:.2f}%")
+financial_trend = calculate_financial_trend(
+    database_transactions
+)
+
+print("\n===== Financial Trend =====")
+print(financial_trend)
+insights = generate_financial_insights(
+    summary,
+    profit_margin,
+    expense_ratio,
+    largest_expense
+)
+
+print("\n===== AI CFO Insights =====")
+
+for insight in insights:
+    print(f"• {insight}")
+
+alerts = generate_financial_alerts(
+    profit_margin,
+    expense_ratio,
+    largest_expense
+)
+
+print("\n===== Financial Alerts =====")
+
+for alert in alerts:
+    print(f"⚠️ {alert}")
