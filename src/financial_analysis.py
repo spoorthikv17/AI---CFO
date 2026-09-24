@@ -16,6 +16,14 @@ def calculate_financial_summary(transactions):
         "total_expenses": total_expenses,
         "profit": profit,
     }
+def calculate_profit_margin(total_income, profit):
+    """Calculate profit margin as a percentage."""
+
+    if total_income == 0:
+        return 0
+
+    return (profit / total_income) * 100
+
 def calculate_monthly_summary(transactions):
     """Calculate monthly income, expenses, and profit."""
 
@@ -56,3 +64,13 @@ def calculate_expense_by_category(transactions):
     result["percentage"] = category_percentage.round(2)
 
     return result
+if __name__ == "__main__":
+    total_income = 223000
+    profit = 148000
+
+    profit_margin = calculate_profit_margin(
+        total_income,
+        profit
+    )
+
+    print(f"Profit Margin: {profit_margin:.2f}%")
