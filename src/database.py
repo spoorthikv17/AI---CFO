@@ -10,8 +10,12 @@ from financial_analysis import (
     calculate_expense_ratio,
     calculate_financial_trend,
     generate_financial_insights,
-    generate_financial_alerts
+    generate_financial_alerts,
+    detect_large_expenses,
+    calculate_transaction_risk,
+    summarize_financial_risk
 )
+
 
 def connect_to_database(db_path):
     """Create a connection to the SQLite database."""
@@ -134,3 +138,47 @@ print("\n===== Financial Alerts =====")
 
 for alert in alerts:
     print(f"⚠️ {alert}")
+
+    large_expenses = detect_large_expenses(
+        database_transactions
+    )
+
+    print("\n===== Large Expense Anomalies =====")
+
+    if large_expenses.empty:
+        print("No unusually large expenses detected.")
+    else:
+        print(large_expenses[
+            ["date", "description", "category", "amount"]
+        ])
+
+    risk_analysis = calculate_transaction_risk(
+        database_transactions
+    )
+
+    print("\n===== Transaction Risk Analysis =====")
+
+    if risk_analysis.empty:
+        print("No expense transactions available.")
+    else:
+        print(
+            risk_analysis[
+                [
+                    "date",
+                    "description",
+                    "category",
+                    "amount",
+                    "risk_level"
+                ]
+            ]
+        )
+
+        risk_summary = summarize_financial_risk(
+        risk_analysis
+    )
+
+    print("\n===== Overall Financial Risk =====")
+    print(f"High Risk Transactions   : {risk_summary['high']}")
+    print(f"Medium Risk Transactions : {risk_summary['medium']}")
+    print(f"Low Risk Transactions    : {risk_summary['low']}")
+    print(f"Overall Risk Level       : {risk_summary['overall_risk']}")

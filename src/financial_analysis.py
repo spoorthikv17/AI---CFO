@@ -208,3 +208,81 @@ def generate_financial_alerts(
         )
 
     return alerts
+def detect_large_expenses(transactions):
+    """Detect unusually large expense transactions."""
+
+    expenses = transactions[
+        transactions["type"] == "Expense"
+    ].copy()
+
+    if expenses.empty:
+        return expenses
+
+    threshold = expenses["amount"].mean() + (
+        2 * expenses["amount"].std()
+    )
+
+    large_expenses = expenses[
+        expenses["amount"] > threshold
+    ]
+
+    return large_expenses
+def calculate_transaction_risk(transactions):
+    """Assign a risk level to expense transactions."""
+
+    expenses = transactions[
+        transactions["type"] == "Expense"
+    ].copy()
+
+    if expenses.empty:
+        return expenses
+
+    mean_expense = expenses["amount"].mean()
+    std_expense = expenses["amount"].std()
+
+    medium_threshold = mean_expense + std_expense
+    high_threshold = mean_expense + (2 * std_expense)
+
+    def assign_risk(amount):
+        if amount > high_threshold:
+            return "High"
+        elif amount > medium_threshold:
+            return "Medium"
+        else:
+            return "Low"
+
+    expenses["risk_level"] = expenses["amount"].apply(
+        assign_risk
+    )
+
+    return expenses
+def summarize_financial_risk(risk_analysis):
+    """Summarize transaction risk levels."""
+
+    if risk_analysis.empty:
+        return {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "overall_risk": "Low"
+        }
+
+    risk_counts = risk_analysis["risk_level"].value_counts()
+
+    high = risk_counts.get("High", 0)
+    medium = risk_counts.get("Medium", 0)
+    low = risk_counts.get("Low", 0)
+
+    if high >= 2:
+        overall_risk = "High"
+    elif high == 1 or medium >= 2:
+        overall_risk = "Medium"
+    else:
+        overall_risk = "Low"
+
+    return {
+        "high": high,
+        "medium": medium,
+        "low": low,
+        "overall_risk": overall_risk
+    }
