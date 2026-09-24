@@ -4,7 +4,9 @@ import pandas as pd
 from financial_analysis import (
     calculate_financial_summary,
     calculate_profit_margin,
-     calculate_cash_flow
+    calculate_cash_flow,
+    calculate_expense_by_category,
+    identify_largest_expense
 )
 
 def connect_to_database(db_path):
@@ -82,3 +84,14 @@ cash_flow = calculate_cash_flow(database_transactions)
 
 print("\n===== Cash Flow Analysis =====")
 print(cash_flow)
+expense_by_category = calculate_expense_by_category(
+    database_transactions
+)
+
+largest_expense = identify_largest_expense(
+    expense_by_category
+)
+
+print("\n===== Largest Expense =====")
+print(f"Category : {largest_expense['category']}")
+print(f"Amount   : ₹{largest_expense['amount']:,.2f}")

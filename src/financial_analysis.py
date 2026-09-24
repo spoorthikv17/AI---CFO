@@ -92,3 +92,18 @@ def calculate_cash_flow(transactions):
     )
 
     return cash_flow
+def identify_largest_expense(expense_by_category):
+    """Identify the category with the highest expense."""
+
+    if expense_by_category.empty:
+        return None
+
+    largest_category = expense_by_category["amount"].idxmax()
+    largest_amount = expense_by_category.loc[
+        largest_category, "amount"
+    ]
+
+    return {
+        "category": largest_category,
+        "amount": largest_amount
+    }
