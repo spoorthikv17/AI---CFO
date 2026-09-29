@@ -286,3 +286,151 @@ def summarize_financial_risk(risk_analysis):
         "low": low,
         "overall_risk": overall_risk
     }
+def generate_financial_recommendations(
+    summary,
+    profit_margin,
+    expense_ratio,
+    largest_expense,
+    risk_summary
+):
+    """Generate CFO-style financial recommendations."""
+
+    recommendations = []
+
+    if profit_margin < 20:
+        recommendations.append(
+            "Consider improving the profit margin by increasing revenue "
+            "or reducing unnecessary expenses."
+        )
+
+    if expense_ratio > 70:
+        recommendations.append(
+            "Expenses are high compared to income. "
+            "Review major spending categories."
+        )
+
+    if largest_expense:
+        recommendations.append(
+            f"Monitor {largest_expense['category']} expenses, "
+            f"which currently total ₹{largest_expense['amount']:,.2f}."
+        )
+
+    if risk_summary["high"] > 0:
+        recommendations.append(
+            "Review high-risk transactions to identify unusual or "
+            "potentially avoidable spending."
+        )
+
+    if risk_summary["medium"] > 0:
+        recommendations.append(
+            "Monitor medium-risk transactions and check whether "
+            "they are recurring or necessary."
+        )
+    if summary["total_income"] > 0 and summary["profit"] > 0:
+        recommendations.append(
+            f"Current operations generated a profit of "
+            f"₹{summary['profit']:,.2f}. "
+            f"Continue tracking revenue and expenses to maintain this performance."
+        )
+
+    if largest_expense:
+        if largest_expense["amount"] > 25000:
+            recommendations.append(
+                f"{largest_expense['category']} is a major expense category. "
+                f"Review whether this cost can be optimized without affecting "
+                f"business operations."
+            )
+
+    if not recommendations:
+        recommendations.append(
+            "Financial indicators are currently stable. "
+            "Continue monitoring income, expenses, and cash flow."
+        )
+
+    return recommendations
+
+def create_ai_financial_context(
+    summary,
+    profit_margin,
+    expense_ratio,
+    largest_expense,
+    risk_summary,
+    recommendations
+):
+    """Create structured financial context for the AI layer."""
+
+    return {
+        "total_income": summary["total_income"],
+        "total_expenses": summary["total_expenses"],
+        "profit": summary["profit"],
+        "profit_margin": profit_margin,
+        "expense_ratio": expense_ratio,
+        "largest_expense_category": (
+            largest_expense["category"]
+            if largest_expense
+            else None
+        ),
+        "largest_expense_amount": (
+            largest_expense["amount"]
+            if largest_expense
+            else 0
+        ),
+        "high_risk_transactions": risk_summary["high"],
+        "medium_risk_transactions": risk_summary["medium"],
+        "low_risk_transactions": risk_summary["low"],
+        "recommendations": recommendations
+    }
+def format_ai_financial_context(ai_context):
+    """Convert financial context into readable AI input."""
+
+    context = f"""
+AI CFO Financial Context
+
+Total Income: ₹{ai_context['total_income']:,.2f}
+Total Expenses: ₹{ai_context['total_expenses']:,.2f}
+Profit: ₹{ai_context['profit']:,.2f}
+Profit Margin: {ai_context['profit_margin']:.2f}%
+Expense Ratio: {ai_context['expense_ratio']:.2f}%
+
+Largest Expense Category:
+{ai_context['largest_expense_category']} - ₹{ai_context['largest_expense_amount']:,.2f}
+
+Risk Summary:
+High Risk Transactions: {ai_context['high_risk_transactions']}
+Medium Risk Transactions: {ai_context['medium_risk_transactions']}
+Low Risk Transactions: {ai_context['low_risk_transactions']}
+
+Current Recommendations:
+"""
+
+    for recommendation in ai_context["recommendations"]:
+        context += f"- {recommendation}\n"
+
+    return context
+
+def create_cfo_prompt(formatted_context, user_question):
+    """Create a concise prompt for the AI CFO."""
+
+    prompt = f"""
+You are an AI CFO assistant.
+
+Use the financial data below to answer the user's question.
+
+Rules:
+- Use only the provided financial data.
+- Do not invent numbers.
+- Explain your reasoning simply.
+- Mention relevant numbers.
+- Give practical suggestions when appropriate.
+- If the data is insufficient, say so.
+
+FINANCIAL DATA:
+{formatted_context}
+
+USER QUESTION:
+{user_question}
+
+Answer clearly and concisely.
+"""
+
+    return prompt

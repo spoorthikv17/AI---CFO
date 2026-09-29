@@ -1,184 +1,266 @@
-import sqlite3
-import pandas as pd
+import streamlit as st
 
-from financial_analysis import (
-    calculate_financial_summary,
-    calculate_profit_margin,
-    calculate_cash_flow,
-    calculate_expense_by_category,
-    identify_largest_expense,
-    calculate_expense_ratio,
-    calculate_financial_trend,
-    generate_financial_insights,
-    generate_financial_alerts,
-    detect_large_expenses,
-    calculate_transaction_risk,
-    summarize_financial_risk
+
+st.set_page_config(
+    page_title="AI CFO",
+    page_icon="💰",
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 
-def connect_to_database(db_path):
-    """Create a connection to the SQLite database."""
-    return sqlite3.connect(db_path)
+# --------------------------------------------------
+# SESSION STATE
+# --------------------------------------------------
 
-def load_transactions_from_database(db_path):
-    """Load transactions from the SQLite database."""
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-    conn = connect_to_database(db_path)
+if "auth_page" not in st.session_state:
+    st.session_state.auth_page = "login"
 
-    transactions = pd.read_sql_query(
-        "SELECT * FROM transactions",
-        conn
+
+# --------------------------------------------------
+# CUSTOM CSS
+# --------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+
+    .stApp {
+        background: #f7f8fc;
+    }
+
+    .auth-container {
+        max-width: 520px;
+        margin: 70px auto;
+        padding: 40px;
+        background: white;
+        border-radius: 20px;
+        box-shadow: 0 10px 35px rgba(0,0,0,0.08);
+    }
+
+    .brand {
+        text-align: center;
+        font-size: 38px;
+        font-weight: 700;
+        margin-bottom: 5px;
+    }
+
+    .tagline {
+        text-align: center;
+        color: #6b7280;
+        margin-bottom: 30px;
+    }
+
+    .welcome {
+        text-align: center;
+        margin-bottom: 25px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# --------------------------------------------------
+# LOGIN / SIGNUP
+# --------------------------------------------------
+
+if not st.session_state.authenticated:
+
+    st.markdown(
+        '<div class="auth-container">',
+        unsafe_allow_html=True
     )
 
-    conn.close()
+    st.markdown(
+        '<div class="brand">💰 AI CFO</div>',
+        unsafe_allow_html=True
+    )
 
-    transactions["date"] = pd.to_datetime(transactions["date"])
+    st.markdown(
+        '<div class="tagline">'
+        'Your intelligent financial assistant'
+        '</div>',
+        unsafe_allow_html=True
+    )
 
-    return transactions
+    if st.session_state.auth_page == "login":
 
-def save_transactions(transactions, db_path):
-    """Save transaction data into the SQLite database."""
-
-    conn = connect_to_database(db_path)
-
-    existing_count = conn.execute(
-        "SELECT COUNT(*) FROM transactions"
-    ).fetchone()[0]
-
-    if existing_count == 0:
-        transactions.to_sql(
-            "transactions",
-            conn,
-            if_exists="append",
-            index=False
+        st.markdown(
+            '<div class="welcome">'
+            '<h2>Welcome back 👋</h2>'
+            '<p>Login to continue to your AI CFO</p>'
+            '</div>',
+            unsafe_allow_html=True
         )
 
-        print("Transactions saved to database successfully.")
+        login_id = st.text_input(
+            "Email or Phone",
+            placeholder="Enter your email or phone number"
+        )
+
+        password = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Enter your password"
+        )
+
+        if st.button(
+            "Login",
+            use_container_width=True
+        ):
+            if login_id and password:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error(
+                    "Please enter your email/phone and password."
+                )
+
+        st.divider()
+
+        if st.button(
+            "Forgot Password?",
+            use_container_width=True
+        ):
+            st.info(
+                "Password recovery will be connected "
+                "when we build the authentication backend."
+            )
+
+        if st.button(
+            "Create New Account",
+            use_container_width=True
+        ):
+            st.session_state.auth_page = "signup"
+            st.rerun()
 
     else:
-        print("Transactions already exist in database. No duplicate data inserted.")
 
-    conn.close()
+        st.markdown(
+            '<div class="welcome">'
+            '<h2>Create your account 🚀</h2>'
+            '<p>Start managing your finances intelligently</p>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
+        name = st.text_input(
+            "Full Name",
+            placeholder="Enter your name"
+        )
 
-if __name__ == "__main__":
-    file_path = "data/transactions.csv"
-    db_path = "data/ai_cfo.db"
+        email = st.text_input(
+            "Email",
+            placeholder="Enter your email"
+        )
 
-    transactions = pd.read_csv(file_path)
+        phone = st.text_input(
+            "Phone Number",
+            placeholder="Enter your phone number"
+        )
 
-    save_transactions(transactions, db_path)
+        password = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Create a password"
+        )
 
-    database_transactions = load_transactions_from_database(db_path)
+        confirm_password = st.text_input(
+            "Confirm Password",
+            type="password",
+            placeholder="Confirm your password"
+        )
 
-    print("\n===== Transactions Loaded From Database =====")
-    print(database_transactions.head())
-
-summary = calculate_financial_summary(database_transactions)
-
-profit_margin = calculate_profit_margin(
-    summary["total_income"],
-    summary["profit"]
-)
-
-print("\n===== Financial Analysis From Database =====")
-print(f"Total Income   : ₹{summary['total_income']:,.2f}")
-print(f"Total Expenses : ₹{summary['total_expenses']:,.2f}")
-print(f"Profit         : ₹{summary['profit']:,.2f}")
-print(f"Profit Margin  : {profit_margin:.2f}%")
-
-cash_flow = calculate_cash_flow(database_transactions)
-
-print("\n===== Cash Flow Analysis =====")
-print(cash_flow)
-expense_by_category = calculate_expense_by_category(
-    database_transactions
-)
-
-largest_expense = identify_largest_expense(
-    expense_by_category
-)
-
-print("\n===== Largest Expense =====")
-print(f"Category : {largest_expense['category']}")
-print(f"Amount   : ₹{largest_expense['amount']:,.2f}")
-expense_ratio = calculate_expense_ratio(
-    summary["total_income"],
-    summary["total_expenses"]
-)
-
-print("\n===== Financial Health =====")
-print(f"Expense Ratio : {expense_ratio:.2f}%")
-financial_trend = calculate_financial_trend(
-    database_transactions
-)
-
-print("\n===== Financial Trend =====")
-print(financial_trend)
-insights = generate_financial_insights(
-    summary,
-    profit_margin,
-    expense_ratio,
-    largest_expense
-)
-
-print("\n===== AI CFO Insights =====")
-
-for insight in insights:
-    print(f"• {insight}")
-
-alerts = generate_financial_alerts(
-    profit_margin,
-    expense_ratio,
-    largest_expense
-)
-
-print("\n===== Financial Alerts =====")
-
-for alert in alerts:
-    print(f"⚠️ {alert}")
-
-    large_expenses = detect_large_expenses(
-        database_transactions
-    )
-
-    print("\n===== Large Expense Anomalies =====")
-
-    if large_expenses.empty:
-        print("No unusually large expenses detected.")
-    else:
-        print(large_expenses[
-            ["date", "description", "category", "amount"]
-        ])
-
-    risk_analysis = calculate_transaction_risk(
-        database_transactions
-    )
-
-    print("\n===== Transaction Risk Analysis =====")
-
-    if risk_analysis.empty:
-        print("No expense transactions available.")
-    else:
-        print(
-            risk_analysis[
+        if st.button(
+            "Create Account",
+            use_container_width=True
+        ):
+            if not all(
                 [
-                    "date",
-                    "description",
-                    "category",
-                    "amount",
-                    "risk_level"
+                    name,
+                    email,
+                    phone,
+                    password,
+                    confirm_password
                 ]
-            ]
-        )
+            ):
+                st.error(
+                    "Please fill in all fields."
+                )
 
-        risk_summary = summarize_financial_risk(
-        risk_analysis
+            elif password != confirm_password:
+                st.error(
+                    "Passwords do not match."
+                )
+
+            else:
+                st.success(
+                    "Account UI is ready. "
+                    "Real authentication will be connected next."
+                )
+
+        st.divider()
+
+        if st.button(
+            "Already have an account? Login",
+            use_container_width=True
+        ):
+            st.session_state.auth_page = "login"
+            st.rerun()
+
+    st.markdown(
+        '</div>',
+        unsafe_allow_html=True
     )
 
-    print("\n===== Overall Financial Risk =====")
-    print(f"High Risk Transactions   : {risk_summary['high']}")
-    print(f"Medium Risk Transactions : {risk_summary['medium']}")
-    print(f"Low Risk Transactions    : {risk_summary['low']}")
-    print(f"Overall Risk Level       : {risk_summary['overall_risk']}")
+    st.stop()
+
+
+# --------------------------------------------------
+# DASHBOARD
+# --------------------------------------------------
+
+st.sidebar.title("💰 AI CFO")
+
+st.sidebar.markdown("### Navigation")
+
+page = st.sidebar.radio(
+    "Go to",
+    [
+        "🏠 Overview",
+        "💳 Transactions",
+        "🧾 Receipts",
+        "📊 Analytics",
+        "🔮 Forecast",
+        "⚠️ Risk & Anomalies",
+        "🤖 AI CFO",
+        "⚙️ Settings"
+    ]
+)
+
+st.sidebar.divider()
+
+if st.sidebar.button(
+    "🚪 Logout",
+    use_container_width=True
+):
+    st.session_state.authenticated = False
+    st.session_state.auth_page = "login"
+    st.rerun()
+
+
+st.title("🏠 AI CFO Dashboard")
+
+st.write(
+    "Welcome to your financial command center."
+)
+
+st.info(
+    "Dashboard modules will be connected to your real "
+    "financial database step by step."
+)
