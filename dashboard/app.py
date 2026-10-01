@@ -1,8 +1,14 @@
 import os
 import hashlib
 import hmac
+import json
+import secrets
+import smtplib
+from email.message import EmailMessage
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from dotenv import load_dotenv
 
 import pandas as pd
 import numpy as np
@@ -13,6 +19,8 @@ import plotly.graph_objects as go
 # ============================================================
 # MONEYFLOW - END-TO-END STREAMLIT DASHBOARD
 # ============================================================
+
+load_dotenv()
 
 st.set_page_config(
     page_title="MoneyFlow",
@@ -27,6 +35,10 @@ st.set_page_config(
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 TRANSACTIONS_FILE = DATA_DIR / "transactions.csv"
+USERS_FILE = DATA_DIR / "users.json"
+SESSIONS_FILE = DATA_DIR / "device_sessions.json"
+USERS_DIR = DATA_DIR / "users"
+USERS_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = DATA_DIR / "historical_monthly_financials.csv"
 
 # -----------------------------
@@ -610,10 +622,8 @@ if "user_email" not in st.session_state:
 if "user_name" not in st.session_state:
     st.session_state.user_name = "User"
 
-# Demo credentials are kept for the current Streamlit session so that
-# the same email/phone cannot be opened with a different password.
-if "demo_users" not in st.session_state:
-    st.session_state.demo_users = {}
+if "auth_mode" not in st.session_state:
+    st.session_state.auth_mode = "login"
 
 if "selected_transaction" not in st.session_state:
     st.session_state.selected_transaction = None
@@ -621,6 +631,100 @@ if "selected_transaction" not in st.session_state:
 if "settings" not in st.session_state:
     st.session_state.settings = {"theme":"Light","currency":"INR (₹)","date_format":"DD-MM-YYYY","financial_alerts":True,"risk_alerts":True,"forecast_alerts":True,"ai_alerts":True,"biometric":False,"remember_device":True,"ai_suggestions":True,"automatic_explanations":True,"forecast_insights":True}
 
+
+def _read_json(path, default):
+    try:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return default
+
+
+def _write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    with open(temp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    temp.replace(path)
+
+
+def _load_users():
+    return _read_json(USERS_FILE, {})
+
+
+def _save_users(users):
+    _write_json(USERS_FILE, users)
+
+
+def _device_key():
+    # Streamlit does not expose a writable browser cookie API here.
+    # Use the browser/device user-agent as a lightweight local prototype key.
+    try:
+        headers = dict(st.context.headers)
+        user_agent = headers.get("User-Agent", "unknown-device")
+    except Exception:
+        user_agent = "unknown-device"
+    return hashlib.sha256(user_agent.encode("utf-8")).hexdigest()[:24]
+
+
+def _user_key(identifier):
+    return hashlib.sha256(identifier.strip().lower().encode("utf-8")).hexdigest()[:24]
+
+
+def _user_dir(identifier=None):
+    identifier = identifier or st.session_state.user_email
+    folder = USERS_DIR / _user_key(identifier)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _user_transactions_file(identifier=None):
+    return _user_dir(identifier) / "transactions.csv"
+
+
+def _start_login(identifier, user):
+    identifier = identifier.strip().lower()
+    st.session_state.logged_in = True
+    st.session_state.user_email = identifier
+    st.session_state.user_name = user.get("name", "MoneyFlow User")
+    st.session_state.auth_mode = "login"
+
+    sessions = _read_json(SESSIONS_FILE, {})
+    device = _device_key()
+    token = secrets.token_urlsafe(32)
+    sessions[device] = {"token": token, "user": identifier}
+    _write_json(SESSIONS_FILE, sessions)
+
+
+def _restore_login():
+    if st.session_state.logged_in:
+        return
+    sessions = _read_json(SESSIONS_FILE, {})
+    saved = sessions.get(_device_key())
+    if not saved:
+        return
+    identifier = saved.get("user", "")
+    users = _load_users()
+    user = users.get(identifier)
+    if user:
+        st.session_state.logged_in = True
+        st.session_state.user_email = identifier
+        st.session_state.user_name = user.get("name", "MoneyFlow User")
+
+
+def _clear_login():
+    device = _device_key()
+    sessions = _read_json(SESSIONS_FILE, {})
+    sessions.pop(device, None)
+    _write_json(SESSIONS_FILE, sessions)
+    st.session_state.logged_in = False
+    st.session_state.user_email = ""
+    st.session_state.user_name = "User"
+    st.session_state.auth_mode = "login"
+
+# Do not auto-restore a previous account. Each new app session starts at login.
 # Apply the selected theme to the actual Streamlit interface.
 _current_theme = st.session_state.settings.get("theme", "Light")
 if _current_theme == "Dark":
@@ -662,42 +766,126 @@ elif _current_theme == "System default":
 # DATA FUNCTIONS
 # ============================================================
 
-@st.cache_data
-def load_transactions():
-    if not TRANSACTIONS_FILE.exists():
-        return pd.DataFrame(
-            columns=["id", "date", "description", "category", "type", "amount"]
-        )
+def _datasets_file(identifier=None):
+    return _user_dir(identifier) / "datasets.json"
 
-    df = pd.read_csv(TRANSACTIONS_FILE)
 
+def _dataset_folder(identifier=None):
+    folder = _user_dir(identifier) / "datasets"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _read_datasets(identifier=None):
+    path = _datasets_file(identifier)
+    data = _read_json(path, [])
+    if not isinstance(data, list):
+        data = []
+    return data
+
+
+def _write_datasets(data, identifier=None):
+    _write_json(_datasets_file(identifier), data)
+
+
+def _dataset_categories(df):
+    if df is None or df.empty or "category" not in df.columns:
+        return []
+    return sorted({str(x).strip().casefold() for x in df["category"].dropna() if str(x).strip()})
+
+
+def _dataset_file(dataset_id, identifier=None):
+    return _dataset_folder(identifier) / f"dataset_{dataset_id}.csv"
+
+
+def _ensure_dataset_registry(identifier=None):
+    """Create/migrate the per-user dataset registry without deleting existing data."""
+    identifier = identifier or st.session_state.get("user_email", "")
+    if not identifier:
+        return []
+
+    datasets = _read_datasets(identifier)
+    if datasets:
+        return datasets
+
+    legacy = _user_transactions_file(identifier)
+    if legacy.exists():
+        try:
+            old = pd.read_csv(legacy)
+        except Exception:
+            old = pd.DataFrame()
+        if not old.empty:
+            dataset_id = "dataset_1"
+            target = _dataset_file(dataset_id, identifier)
+            old.to_csv(target, index=False)
+            meta = [{
+                "id": dataset_id,
+                "name": "Dataset 1",
+                "categories": _dataset_categories(old),
+                "rows": int(len(old)),
+            }]
+            _write_datasets(meta, identifier)
+            return meta
+
+    return []
+
+
+def _active_dataset_id(identifier=None):
+    identifier = identifier or st.session_state.get("user_email", "")
+    datasets = _ensure_dataset_registry(identifier)
+    if not datasets:
+        return None
+    current = st.session_state.get("active_dataset_id")
+    ids = [d.get("id") for d in datasets]
+    if current not in ids:
+        current = ids[0]
+        st.session_state.active_dataset_id = current
+    return current
+
+
+def _set_active_dataset(dataset_id):
+    st.session_state.active_dataset_id = dataset_id
+
+
+def _load_dataset_by_id(dataset_id, identifier=None):
+    empty = pd.DataFrame(columns=["id", "date", "description", "category", "type", "amount"])
+    if not dataset_id:
+        return empty
+    path = _dataset_file(dataset_id, identifier)
+    if not path.exists():
+        return empty
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return empty
     required = ["id", "date", "description", "category", "type", "amount"]
     for col in required:
         if col not in df.columns:
-            if col == "id":
-                df[col] = range(1, len(df) + 1)
-            else:
-                df[col] = ""
-
+            df[col] = range(1, len(df) + 1) if col == "id" else ""
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
     df["type"] = df["type"].astype(str).str.strip().str.title()
     df["category"] = df["category"].astype(str).str.strip()
     df["description"] = df["description"].astype(str).str.strip()
-
     df = df.dropna(subset=["date", "amount"])
     df = df[df["amount"] > 0]
     df = df[df["type"].isin(["Income", "Expense"])]
     df = df.drop_duplicates()
-
     return df.sort_values("date").reset_index(drop=True)
+
+
+def load_transactions():
+    identifier = st.session_state.get("user_email", "")
+    if not identifier:
+        return pd.DataFrame(columns=["id", "date", "description", "category", "type", "amount"])
+    dataset_id = _active_dataset_id(identifier)
+    return _load_dataset_by_id(dataset_id, identifier)
 
 
 @st.cache_data
 def load_history():
     if not HISTORY_FILE.exists():
         return pd.DataFrame(columns=["month", "income", "expenses"])
-
     df = pd.read_csv(HISTORY_FILE)
     df["month"] = pd.to_datetime(df["month"], errors="coerce")
     df["income"] = pd.to_numeric(df["income"], errors="coerce")
@@ -708,10 +896,60 @@ def load_history():
 
 
 def save_transactions(df):
+    identifier = st.session_state.get("user_email", "")
+    if not identifier:
+        return
+    dataset_id = _active_dataset_id(identifier)
+    if not dataset_id:
+        datasets = _read_datasets(identifier)
+        dataset_id = "dataset_1"
+        datasets.append({"id": dataset_id, "name": "Dataset 1", "categories": _dataset_categories(df), "rows": 0})
+        _write_datasets(datasets, identifier)
+        st.session_state.active_dataset_id = dataset_id
     output = df.copy()
-    output["date"] = pd.to_datetime(output["date"]).dt.strftime("%Y-%m-%d")
-    output.to_csv(TRANSACTIONS_FILE, index=False)
-    load_transactions.clear()
+    output["date"] = pd.to_datetime(output["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    output.to_csv(_dataset_file(dataset_id, identifier), index=False)
+    datasets = _read_datasets(identifier)
+    for item in datasets:
+        if item.get("id") == dataset_id:
+            item["categories"] = _dataset_categories(output)
+            item["rows"] = int(len(output))
+    _write_datasets(datasets, identifier)
+
+
+def _merge_into_dataset(dataset_id, clean, identifier=None):
+    existing = _load_dataset_by_id(dataset_id, identifier)
+    combined = pd.concat([existing, clean], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["date", "description", "category", "type", "amount"]).copy()
+    combined["id"] = range(1, len(combined) + 1)
+    combined = combined[["id", "date", "description", "category", "type", "amount"]]
+    combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
+    combined.to_csv(_dataset_file(dataset_id, identifier), index=False)
+    return combined
+
+
+def _create_dataset(clean, name, identifier=None):
+    datasets = _read_datasets(identifier)
+    numbers = []
+    for item in datasets:
+        try:
+            numbers.append(int(str(item.get("name", "")).split()[-1]))
+        except Exception:
+            pass
+    number = max(numbers, default=0) + 1
+    dataset_id = f"dataset_{secrets.token_hex(6)}"
+    clean = clean.copy()
+    clean["id"] = range(1, len(clean) + 1)
+    clean = clean[["id", "date", "description", "category", "type", "amount"]]
+    clean.to_csv(_dataset_file(dataset_id, identifier), index=False)
+    datasets.append({
+        "id": dataset_id,
+        "name": f"Dataset {number}",
+        "categories": _dataset_categories(clean),
+        "rows": int(len(clean)),
+    })
+    _write_datasets(datasets, identifier)
+    return dataset_id
 
 
 def money(value):
@@ -837,87 +1075,204 @@ def build_insights(df):
 # AUTHENTICATION
 # ============================================================
 
+
+def _send_password_reset_code(email_address, code):
+    """Send a real password-reset code through configured SMTP email."""
+    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "").strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
+
+    if not smtp_user or not smtp_password:
+        raise RuntimeError(
+            "Password-reset email is not configured. Add SMTP_USER and SMTP_PASSWORD to the .env file."
+        )
+
+    message = EmailMessage()
+    message["Subject"] = "MoneyFlow Password Reset Code"
+    message["From"] = smtp_user
+    message["To"] = email_address
+    message.set_content(
+        f"""Hello,\n\n"
+        f"Your MoneyFlow password reset code is: {code}\n\n"
+        "This code expires in 10 minutes. If you did not request a password reset, ignore this email.\n\n"
+        "MoneyFlow\nAI Financial Command Center"""
+    )
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+        server.starttls()
+        server.login(smtp_user, smtp_password)
+        server.send_message(message)
+
+
+def _create_reset_code(email_address):
+    code = f"{secrets.randbelow(1000000):06d}"
+    reset_store = DATA_DIR / "password_resets.json"
+    resets = _read_json(reset_store, {})
+    resets[email_address] = {
+        "code": code,
+        "expires_at": (datetime.utcnow() + timedelta(minutes=10)).isoformat(),
+    }
+    _write_json(reset_store, resets)
+    return code
+
+
+def _verify_reset_code(email_address, code):
+    reset_store = DATA_DIR / "password_resets.json"
+    resets = _read_json(reset_store, {})
+    record = resets.get(email_address)
+    if not record:
+        return False
+    try:
+        expires = datetime.fromisoformat(record["expires_at"])
+    except (KeyError, ValueError, TypeError):
+        return False
+    if datetime.utcnow() > expires:
+        resets.pop(email_address, None)
+        _write_json(reset_store, resets)
+        return False
+    return hmac.compare_digest(str(record.get("code", "")), str(code).strip())
+
+
+def _consume_reset_code(email_address):
+    reset_store = DATA_DIR / "password_resets.json"
+    resets = _read_json(reset_store, {})
+    resets.pop(email_address, None)
+    _write_json(reset_store, resets)
+
+
 def login_page():
     left, center, right = st.columns([1, 1.35, 1])
 
     with center:
-        st.markdown(
-            """
-            <div class="hero">
-                <span class="hero-badge">SMART FINANCE • MONEYFLOW</span>
-                <h1>💼 MoneyFlow</h1>
-                <p>Sign in to your financial command center.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.markdown("""<div class="hero"><span class="hero-badge">SMART FINANCE • MONEYFLOW</span><h1>💼 MoneyFlow</h1><p>Your personal financial command center.</p></div>""", unsafe_allow_html=True)
 
         with st.container(border=True):
-            st.subheader("Welcome back")
+            mode = st.session_state.auth_mode
 
-            mode = st.radio(
-                "Login method",
-                ["Email", "Phone"],
-                horizontal=True,
-                label_visibility="collapsed",
-            )
+            if mode == "create":
+                st.subheader("Create your MoneyFlow account")
+                name = st.text_input("Full name", placeholder="Your name", key="create_name")
+                identifier = st.text_input("Email or phone", placeholder="you@example.com or +91 XXXXX XXXXX", key="create_identifier")
+                password = st.text_input("Password", type="password", placeholder="At least 6 characters", key="create_password")
+                confirm = st.text_input("Confirm password", type="password", placeholder="Re-enter your password", key="create_confirm")
 
-            if mode == "Email":
-                identifier = st.text_input("Email address", placeholder="you@example.com", key="login_email")
-            else:
-                identifier = st.text_input("Phone number", placeholder="+91 XXXXX XXXXX", key="login_phone")
-
-            password = st.text_input(
-                "Password",
-                type="password",
-                placeholder="Enter your password",
-                key="login_password",
-            )
-
-            if st.button("Sign in to MoneyFlow", use_container_width=True, type="primary"):
-                identifier_clean = identifier.strip().lower() if identifier else ""
-                password_clean = password if password else ""
-
-                if not identifier_clean or not password_clean:
-                    st.error("Please enter your login details.")
-                else:
-                    password_hash = hashlib.sha256(password_clean.encode("utf-8")).hexdigest()
-                    stored_hash = st.session_state.demo_users.get(identifier_clean)
-
-                    # First successful login for an identifier creates the demo credential.
-                    if stored_hash is None:
-                        st.session_state.demo_users[identifier_clean] = password_hash
-                        st.session_state.logged_in = True
-                        st.session_state.user_email = identifier_clean
-                        st.session_state.user_name = (
-                            identifier_clean.split("@")[0].replace(".", " ").title()
-                            if "@" in identifier_clean
-                            else "MoneyFlow User"
-                        )
-                        st.rerun()
-
-                    # Existing identifier must use the same password.
-                    elif hmac.compare_digest(stored_hash, password_hash):
-                        st.session_state.logged_in = True
-                        st.session_state.user_email = identifier_clean
-                        st.session_state.user_name = (
-                            identifier_clean.split("@")[0].replace(".", " ").title()
-                            if "@" in identifier_clean
-                            else "MoneyFlow User"
-                        )
-                        st.rerun()
+                if st.button("Create account", use_container_width=True, type="primary", key="create_account_submit"):
+                    identifier_clean = identifier.strip().lower() if identifier else ""
+                    users = _load_users()
+                    if not name.strip() or not identifier_clean or not password:
+                        st.error("Please fill in all fields.")
+                    elif len(password) < 6:
+                        st.error("Password must contain at least 6 characters.")
+                    elif password != confirm:
+                        st.error("Passwords do not match.")
+                    elif identifier_clean in users:
+                        st.error("An account already exists with these details. Please sign in.")
                     else:
-                        st.error("Credentials are not matching. Please check your password.")
+                        users[identifier_clean] = {
+                            "name": name.strip(),
+                            "password_hash": hashlib.sha256(password.encode("utf-8")).hexdigest(),
+                        }
+                        _save_users(users)
+                        _user_transactions_file(identifier_clean)
+                        st.session_state.auth_mode = "login"
+                        st.success("Account created successfully. Please sign in.")
+                        st.rerun()
 
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Create account", use_container_width=True):
-                    st.info("Account creation UI will be connected to the backend.")
-            with col2:
-                if st.button("Forgot password?", use_container_width=True):
-                    st.info("Password recovery will be connected to secure authentication.")
+                if st.button("← Back to Sign in", use_container_width=True, key="back_to_login"):
+                    st.session_state.auth_mode = "login"
+                    st.rerun()
 
-        st.caption("Development authentication UI.")
+            elif mode == "forgot":
+                st.subheader("Forgot your password?")
+                st.caption("Enter the email address used for your MoneyFlow account. We will send a 6-digit reset code.")
+                reset_email = st.text_input("Email address", placeholder="you@example.com", key="reset_email")
+
+                if st.button("Send reset code", use_container_width=True, type="primary", key="send_reset_code"):
+                    email_clean = reset_email.strip().lower() if reset_email else ""
+                    users = _load_users()
+                    user = users.get(email_clean)
+
+                    if "@" not in email_clean:
+                        st.error("Password reset by email requires an email account.")
+                    elif user is None:
+                        st.error("No MoneyFlow account was found for this email.")
+                    else:
+                        try:
+                            code = _create_reset_code(email_clean)
+                            _send_password_reset_code(email_clean, code)
+                            st.session_state.reset_email = email_clean
+                            st.session_state.auth_mode = "reset"
+                            st.success("Reset code sent to your email.")
+                            st.rerun()
+                        except Exception as error:
+                            st.error(f"Could not send the reset email: {error}")
+
+                if st.button("← Back to Sign in", use_container_width=True, key="forgot_back"):
+                    st.session_state.auth_mode = "login"
+                    st.rerun()
+
+            elif mode == "reset":
+                st.subheader("Reset your password")
+                reset_email = st.session_state.get("reset_email", "")
+                st.caption(f"Reset code sent to {reset_email}")
+                code = st.text_input("6-digit reset code", max_chars=6, key="reset_code")
+                new_password = st.text_input("New password", type="password", placeholder="At least 6 characters", key="reset_new_password")
+                confirm_password = st.text_input("Confirm new password", type="password", key="reset_confirm_password")
+
+                if st.button("Reset password", use_container_width=True, type="primary", key="reset_password_submit"):
+                    if not _verify_reset_code(reset_email, code):
+                        st.error("Invalid or expired reset code.")
+                    elif len(new_password) < 6:
+                        st.error("Password must contain at least 6 characters.")
+                    elif new_password != confirm_password:
+                        st.error("Passwords do not match.")
+                    else:
+                        users = _load_users()
+                        users[reset_email]["password_hash"] = hashlib.sha256(new_password.encode("utf-8")).hexdigest()
+                        _save_users(users)
+                        _consume_reset_code(reset_email)
+                        st.session_state.auth_mode = "login"
+                        st.session_state.reset_email = ""
+                        st.success("Password reset successfully. Please sign in with your new password.")
+                        st.rerun()
+
+                if st.button("← Back to Sign in", use_container_width=True, key="reset_back"):
+                    st.session_state.auth_mode = "login"
+                    st.rerun()
+
+            else:
+                st.subheader("Welcome back")
+                identifier = st.text_input("Email or phone", placeholder="you@example.com or +91 XXXXX XXXXX", key="login_identifier")
+                password = st.text_input("Password", type="password", placeholder="Enter your password", key="login_password")
+
+                if st.button("Sign in to MoneyFlow", use_container_width=True, type="primary", key="sign_in"):
+                    identifier_clean = identifier.strip().lower() if identifier else ""
+                    users = _load_users()
+                    user = users.get(identifier_clean)
+                    password_hash = hashlib.sha256((password or "").encode("utf-8")).hexdigest()
+
+                    if not identifier_clean or not password:
+                        st.error("Please enter your login details.")
+                    elif user is None:
+                        st.error("No account found. Please create an account first.")
+                    elif not hmac.compare_digest(user.get("password_hash", ""), password_hash):
+                        st.error("Incorrect password. Please try again.")
+                    else:
+                        _start_login(identifier_clean, user)
+                        st.rerun()
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Create account", use_container_width=True, key="go_create"):
+                        st.session_state.auth_mode = "create"
+                        st.rerun()
+                with c2:
+                    if st.button("Forgot password?", use_container_width=True, key="forgot_password"):
+                        st.session_state.auth_mode = "forgot"
+                        st.rerun()
+
+        st.caption("Create an account first. New accounts start with an empty financial workspace.")
 
 # ============================================================
 # SIDEBAR
@@ -957,7 +1312,7 @@ def sidebar():
         )
 
         if st.button("↪  Logout", use_container_width=True, key="sidebar_logout"):
-            st.session_state.logged_in = False
+            _clear_login()
             st.rerun()
 
         st.divider()
@@ -1120,9 +1475,21 @@ User question:
                 )
 
 
+def get_time_greeting():
+    """Return a greeting based on the user's local time."""
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "Good morning 👋"
+    if 12 <= hour < 17:
+        return "Good afternoon 👋"
+    if 17 <= hour < 22:
+        return "Good evening 👋"
+    return "Good night 👋"
+
+
 def overview_page(df):
     page_header(
-        "Good evening 👋",
+        get_time_greeting(),
         "Your financial command center — clear numbers, colourful insights and an AI CFO inside the dashboard.",
     )
 
@@ -1256,45 +1623,71 @@ def overview_page(df):
         with st.container(border=True):
             st.markdown('<div class="section-title">💚 Financial Health</div>', unsafe_allow_html=True)
 
-            health = 50
-            if fm >= 50:
-                health += 25
-            elif fm >= 30:
-                health += 15
-            elif fm >= 15:
-                health += 8
+            # Do not assign a financial-health score before the user has
+            # entered any transactions. A score such as 75/100 would be
+            # misleading because it is not based on the user's data.
+            if filtered.empty:
+                health = None
+                overall = "No data"
 
-            if fr <= 40:
-                health += 15
-            elif fr <= 60:
-                health += 8
-
-            _, _, overall = risk_analysis(filtered)
-            if overall == "Low":
-                health += 10
-            elif overall == "Medium":
-                health += 5
-
-            health = min(100, max(0, int(health)))
-
-            st.markdown(
-                f"""
-                <div style="text-align:center;padding:12px;">
-                    <div style="font-size:48px;font-weight:900;color:#4f46e5;">{health}/100</div>
-                    <div style="font-size:16px;color:#64748b;">Overall financial health</div>
-                    <div style="margin-top:12px;">
-                        <span style="background:#dcfce7;color:#166534;padding:7px 12px;border-radius:999px;font-weight:800;">
-                            Risk: {overall}
-                        </span>
+                st.markdown(
+                    """
+                    <div style="text-align:center;padding:12px;">
+                        <div style="font-size:48px;font-weight:900;color:#64748b;">—/100</div>
+                        <div style="font-size:16px;color:#64748b;">Overall financial health</div>
+                        <div style="margin-top:12px;">
+                            <span style="background:#f1f5f9;color:#475569;padding:7px 12px;border-radius:999px;font-weight:800;">
+                                No financial data yet
+                            </span>
+                        </div>
                     </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.progress(0.0)
+                st.write("Profit margin: **—**")
+                st.write("Expense ratio: **—**")
+                st.caption("Add your first transaction to calculate financial health.")
+            else:
+                health = 50
+                if fm >= 50:
+                    health += 25
+                elif fm >= 30:
+                    health += 15
+                elif fm >= 15:
+                    health += 8
 
-            st.progress(health / 100)
-            st.write(f"Profit margin: **{fm:.1f}%**")
-            st.write(f"Expense ratio: **{fr:.1f}%**")
+                if fr <= 40:
+                    health += 15
+                elif fr <= 60:
+                    health += 8
+
+                _, _, overall = risk_analysis(filtered)
+                if overall == "Low":
+                    health += 10
+                elif overall == "Medium":
+                    health += 5
+
+                health = min(100, max(0, int(health)))
+
+                st.markdown(
+                    f"""
+                    <div style="text-align:center;padding:12px;">
+                        <div style="font-size:48px;font-weight:900;color:#4f46e5;">{health}/100</div>
+                        <div style="font-size:16px;color:#64748b;">Overall financial health</div>
+                        <div style="margin-top:12px;">
+                            <span style="background:#dcfce7;color:#166534;padding:7px 12px;border-radius:999px;font-weight:800;">
+                                Risk: {overall}
+                            </span>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.progress(health / 100)
+                st.write(f"Profit margin: **{fm:.1f}%**")
+                st.write(f"Expense ratio: **{fr:.1f}%**")
 
     with h2:
         with st.container(border=True):
@@ -1320,6 +1713,7 @@ def overview_page(df):
             st.info("No transactions available.")
         else:
             display = recent[["date", "description", "category", "type", "amount"]].copy()
+            display["date"] = pd.to_datetime(display["date"], errors="coerce")
             display["date"] = display["date"].dt.strftime("%d %b %Y")
             display["amount"] = display["amount"].map(money)
             st.dataframe(display, use_container_width=True, hide_index=True)
@@ -1374,6 +1768,7 @@ def transactions_page(df):
 
     with st.container(border=True):
         table = filtered.copy()
+        table["date"] = pd.to_datetime(table["date"], errors="coerce")
         table["date"] = table["date"].dt.strftime("%Y-%m-%d")
         table["amount"] = table["amount"].map(money)
 
@@ -1520,46 +1915,131 @@ def _read_pdf_dataset(uploaded_file):
 def data_import_page():
     page_header(
         "Data Import",
-        "Upload Excel, CSV, or structured PDF financial data and analyze it in MoneyFlow.",
+        "Upload, combine, switch and remove your financial datasets.",
     )
 
+    identifier = st.session_state.get("user_email", "")
+    datasets = _ensure_dataset_registry(identifier)
+
+    # ------------------------------------------------------------
+    # Dataset manager
+    # ------------------------------------------------------------
     with st.container(border=True):
-        st.markdown(
-            '<div class="section-title">1. Upload Financial Dataset</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="section-title">📚 My Financial Datasets</div>', unsafe_allow_html=True)
+
+        if not datasets:
+            st.info("No dataset exists yet. Upload your first financial dataset below.")
+        else:
+            labels = []
+            for item in datasets:
+                cats = ", ".join(item.get("categories", [])) or "No categories"
+                labels.append(f"{item.get('name', 'Dataset')} • {item.get('rows', 0)} rows • {cats}")
+
+            current_id = _active_dataset_id(identifier)
+            current_index = next((i for i, item in enumerate(datasets) if item.get("id") == current_id), 0)
+            selected_label = st.selectbox(
+                "Active dataset",
+                labels,
+                index=current_index,
+                key="active_dataset_selector",
+            )
+            selected_index = labels.index(selected_label)
+            selected_id = datasets[selected_index]["id"]
+
+            if selected_id != current_id:
+                _set_active_dataset(selected_id)
+                st.rerun()
+
+            current = datasets[selected_index]
+            st.caption(
+                f"Active: **{current.get('name', 'Dataset')}**  |  "
+                f"Categories: {', '.join(current.get('categories', [])) or 'None'}  |  "
+                f"Rows: {current.get('rows', 0)}"
+            )
+
+            delete_col, clear_col = st.columns(2)
+            with delete_col:
+                if st.button("🗑️ Remove this dataset", key="remove_active_dataset", type="secondary"):
+                    st.session_state["confirm_delete_dataset"] = selected_id
+                    st.rerun()
+            with clear_col:
+                if st.button("🧹 Clear all my datasets", key="clear_all_datasets", type="secondary"):
+                    st.session_state["confirm_clear_datasets"] = True
+                    st.rerun()
+
+            if st.session_state.get("confirm_delete_dataset") == selected_id:
+                st.warning(f"Delete **{current.get('name', 'this dataset')}** permanently?")
+                yes, no = st.columns(2)
+                with yes:
+                    if st.button("Yes, delete", key="confirm_delete_yes", type="primary"):
+                        path = _dataset_file(selected_id, identifier)
+                        if path.exists():
+                            path.unlink()
+                        datasets = [x for x in _read_datasets(identifier) if x.get("id") != selected_id]
+                        _write_datasets(datasets, identifier)
+                        st.session_state.pop("confirm_delete_dataset", None)
+                        if datasets:
+                            st.session_state.active_dataset_id = datasets[0]["id"]
+                        else:
+                            st.session_state.pop("active_dataset_id", None)
+                        st.success("Dataset removed.")
+                        st.rerun()
+                with no:
+                    if st.button("Cancel", key="confirm_delete_no"):
+                        st.session_state.pop("confirm_delete_dataset", None)
+                        st.rerun()
+
+            if st.session_state.get("confirm_clear_datasets"):
+                st.warning("This will permanently remove ALL your financial datasets on this account.")
+                yes, no = st.columns(2)
+                with yes:
+                    if st.button("Yes, clear everything", key="confirm_clear_yes", type="primary"):
+                        for item in _read_datasets(identifier):
+                            path = _dataset_file(item.get("id"), identifier)
+                            if path.exists():
+                                path.unlink()
+                        _write_datasets([], identifier)
+                        legacy = _user_transactions_file(identifier)
+                        if legacy.exists():
+                            legacy.unlink()
+                        st.session_state.pop("active_dataset_id", None)
+                        st.session_state.pop("confirm_clear_datasets", None)
+                        st.success("All financial datasets removed.")
+                        st.rerun()
+                with no:
+                    if st.button("Cancel", key="confirm_clear_no"):
+                        st.session_state.pop("confirm_clear_datasets", None)
+                        st.rerun()
+
+    # ------------------------------------------------------------
+    # Upload / validate / smart combine
+    # ------------------------------------------------------------
+    with st.container(border=True):
+        st.markdown('<div class="section-title">1. Upload Financial Dataset</div>', unsafe_allow_html=True)
 
         uploaded = st.file_uploader(
             "Choose a financial dataset",
             type=["xlsx", "xls", "csv", "pdf"],
-            help=(
-                "Required columns: date, description, category, type and amount. "
-                "Excel/CSV is recommended; structured PDF tables are also supported."
-            ),
+            help="Required columns: date, description, category, type and amount.",
             key="financial_dataset_uploader",
         )
 
         if uploaded:
             st.success(f"Uploaded: {uploaded.name}")
             suffix = Path(uploaded.name).suffix.lower()
-
             try:
                 if suffix == ".csv":
                     imported_df = pd.read_csv(uploaded)
-
                 elif suffix in [".xlsx", ".xls"]:
                     imported_df = pd.read_excel(uploaded)
-
                 elif suffix == ".pdf":
                     imported_df = _read_pdf_dataset(uploaded)
-
                 else:
                     imported_df = None
 
                 if imported_df is not None:
                     st.session_state["imported_dataset"] = imported_df.copy()
                     st.session_state["imported_filename"] = uploaded.name
-
             except Exception as error:
                 st.error(f"Could not read the dataset: {error}")
 
@@ -1567,25 +2047,11 @@ def data_import_page():
 
     if imported_df is not None:
         with st.container(border=True):
-            st.markdown(
-                '<div class="section-title">2. Preview & Validate</div>',
-                unsafe_allow_html=True,
-            )
-
-            st.dataframe(
-                imported_df,
-                use_container_width=True,
-                height=300,
-                hide_index=True,
-            )
+            st.markdown('<div class="section-title">2. Preview & Validate</div>', unsafe_allow_html=True)
+            st.dataframe(imported_df, use_container_width=True, height=300, hide_index=True)
 
             normalized = imported_df.copy()
-            normalized.columns = [
-                str(column).strip().lower().replace(" ", "_")
-                for column in normalized.columns
-            ]
-
-            # Common PDF/Excel naming variations.
+            normalized.columns = [str(column).strip().lower().replace(" ", "_") for column in normalized.columns]
             rename_map = {}
             for column in normalized.columns:
                 compact = column.replace("_", "")
@@ -1599,138 +2065,97 @@ def data_import_page():
                     rename_map[column] = "type"
                 elif compact in ["value", "amount", "transactionamount"]:
                     rename_map[column] = "amount"
-
             normalized = normalized.rename(columns=rename_map)
 
             required = {"date", "description", "category", "type", "amount"}
             missing = required - set(normalized.columns)
-
             if missing:
-                st.error(
-                    "Missing required columns: "
-                    + ", ".join(sorted(missing))
-                    + ". Required: date, description, category, type, amount."
-                )
+                st.error("Missing required columns: " + ", ".join(sorted(missing)) + ".")
             else:
-                normalized["date"] = pd.to_datetime(
-                    normalized["date"], errors="coerce"
-                )
+                normalized["date"] = pd.to_datetime(normalized["date"], errors="coerce")
                 normalized["amount"] = pd.to_numeric(
-                    normalized["amount"].astype(str).str.replace(",", "", regex=False)
-                    .str.replace("₹", "", regex=False)
-                    .str.replace("Rs.", "", regex=False)
-                    .str.strip(),
+                    normalized["amount"].astype(str).str.replace(",", "", regex=False).str.replace("₹", "", regex=False).str.replace("Rs.", "", regex=False).str.strip(),
                     errors="coerce",
                 )
-
-                normalized["type"] = (
-                    normalized["type"]
-                    .astype(str)
-                    .str.strip()
-                    .str.title()
-                )
+                normalized["type"] = normalized["type"].astype(str).str.strip().str.title()
+                normalized["category"] = normalized["category"].astype(str).str.strip()
 
                 invalid_dates = int(normalized["date"].isna().sum())
                 invalid_amounts = int(normalized["amount"].isna().sum())
-                invalid_types = int(
-                    (~normalized["type"].isin(["Income", "Expense"])).sum()
-                )
-                duplicates = int(normalized.duplicated().sum())
+                invalid_types = int((~normalized["type"].isin(["Income", "Expense"])).sum())
 
                 a, b, c, d = st.columns(4)
                 a.metric("Rows", len(normalized))
-                b.metric(
-                    "Invalid",
-                    invalid_dates + invalid_amounts + invalid_types,
-                )
-                c.metric("Duplicates", duplicates)
-                d.metric(
-                    "Valid",
-                    max(
-                        0,
-                        len(normalized)
-                        - invalid_dates
-                        - invalid_amounts
-                        - invalid_types
-                        - duplicates,
-                    ),
-                )
+                b.metric("Invalid", invalid_dates + invalid_amounts + invalid_types)
+                c.metric("Duplicates", int(normalized.duplicated().sum()))
+                d.metric("Valid", max(0, len(normalized) - invalid_dates - invalid_amounts - invalid_types))
 
-                if invalid_dates or invalid_amounts or invalid_types:
-                    st.warning(
-                        "Some rows contain invalid dates, amounts, or transaction types. "
-                        "Only valid Income/Expense rows will be imported."
-                    )
+                clean = normalized.dropna(subset=["date", "description", "category", "type", "amount"]).copy()
+                clean = clean[clean["type"].isin(["Income", "Expense"])].copy()
+                clean["amount"] = clean["amount"].abs()
+                clean = clean.drop_duplicates(subset=["date", "description", "category", "type", "amount"]).copy()
+                clean = clean[["date", "description", "category", "type", "amount"]]
+                incoming_categories = _dataset_categories(clean)
 
-                if st.button(
-                    "📥  Import Dataset into MoneyFlow",
-                    type="primary",
-                    use_container_width=True,
-                    key="import_financial_dataset",
-                ):
-                    clean = normalized.dropna(
-                        subset=[
-                            "date",
-                            "description",
-                            "category",
-                            "type",
-                            "amount",
-                        ]
-                    ).copy()
-
-                    clean = clean[
-                        clean["type"].isin(["Income", "Expense"])
-                    ].copy()
-
-                    clean["amount"] = clean["amount"].abs()
-
-                    # Remove exact duplicate records before import.
-                    clean = clean.drop_duplicates(
-                        subset=[
-                            "date",
-                            "description",
-                            "category",
-                            "type",
-                            "amount",
-                        ]
-                    ).copy()
-
-                    clean["id"] = range(1, len(clean) + 1)
-                    clean = clean[
-                        [
-                            "id",
-                            "date",
-                            "description",
-                            "category",
-                            "type",
-                            "amount",
-                        ]
+                st.write("")
+                st.markdown("**Dataset matching**")
+                if not incoming_categories:
+                    st.warning("No valid categories were found in this dataset.")
+                else:
+                    st.write("Incoming categories: " + ", ".join(incoming_categories))
+                    matches = [
+                        item for item in _read_datasets(identifier)
+                        if item.get("categories", []) == incoming_categories
                     ]
+                    if matches:
+                        st.success(
+                            f"Matching categories found in {matches[0].get('name', 'an existing dataset')}. "
+                            "This upload will be combined with that dataset."
+                        )
+                    else:
+                        st.info("No dataset has exactly these categories. A new separate dataset will be created.")
 
-                    save_transactions(clean)
+                if st.button("📥 Add Dataset", type="primary", use_container_width=True, key="smart_add_dataset"):
+                    if clean.empty:
+                        st.error("There are no valid transactions to add.")
+                    else:
+                        datasets = _read_datasets(identifier)
+                        matches = [item for item in datasets if item.get("categories", []) == incoming_categories]
+                        if matches:
+                            target = matches[0]
+                            combined = _merge_into_dataset(target["id"], clean, identifier)
+                            for item in datasets:
+                                if item.get("id") == target["id"]:
+                                    item["categories"] = _dataset_categories(combined)
+                                    item["rows"] = int(len(combined))
+                            _write_datasets(datasets, identifier)
+                            st.session_state.active_dataset_id = target["id"]
+                            message = f"Added {len(clean)} rows to {target.get('name', 'the matching dataset')}."
+                        else:
+                            new_id = _create_dataset(clean, st.session_state.get("imported_filename", "Dataset"), identifier)
+                            st.session_state.active_dataset_id = new_id
+                            message = "Categories were different, so a new separate dataset was created."
 
-                    st.session_state["imported_dataset"] = None
-                    st.success(
-                        f"Imported {len(clean)} validated transactions successfully."
-                    )
+                        st.session_state["imported_dataset"] = None
+                        st.session_state.pop("imported_filename", None)
+                        st.success(message)
+                        st.rerun()
+
+                if st.button("✖ Remove uploaded file", key="remove_uploaded_dataset"):
+                    st.session_state.pop("imported_dataset", None)
+                    st.session_state.pop("imported_filename", None)
                     st.rerun()
 
     with st.container(border=True):
-        st.markdown(
-            '<div class="section-title">3. Current MoneyFlow Dataset</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.write(
-            f"MoneyFlow currently contains **{len(load_transactions())} transactions** "
-            f"from `{TRANSACTIONS_FILE.name}`."
-        )
-
-        st.dataframe(
-            load_transactions().tail(10),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.markdown('<div class="section-title">3. Current Dataset</div>', unsafe_allow_html=True)
+        current = load_transactions()
+        datasets = _read_datasets(identifier)
+        active = next((x for x in datasets if x.get("id") == _active_dataset_id(identifier)), None)
+        if active:
+            st.write(f"**{active.get('name', 'Dataset')}** — {len(current)} transactions")
+            st.dataframe(current.tail(10), use_container_width=True, hide_index=True)
+        else:
+            st.info("No dataset selected. Upload a dataset to get started.")
 
 
 # ============================================================
@@ -1835,29 +2260,40 @@ def analytics_page(df):
 def forecast_page():
     page_header(
         "Forecast",
-        "View the next-month financial forecast using the historical financial dataset.",
+        "Generate a next-month forecast from your own MoneyFlow transactions.",
     )
 
-    history = load_history()
+    # Never display the global/demo historical CSV to users.
+    # A new account must start with a completely empty workspace.
+    user_df = load_transactions()
 
-    if history.empty:
-        st.warning("Historical financial data was not found.")
+    if user_df.empty:
+        with st.container(border=True):
+            st.markdown('<div class="section-title">📈 Your Forecast</div>', unsafe_allow_html=True)
+            st.info("No financial data yet. Add transactions or upload a receipt to generate your first forecast.")
         return
 
-    with st.container(border=True):
-        st.markdown('<div class="section-title">📚 Historical Financial Data</div>', unsafe_allow_html=True)
-        st.dataframe(
-            history.assign(
-                month=history["month"].dt.strftime("%b %Y"),
-                income=history["income"].map(money),
-                expenses=history["expenses"].map(money),
-                profit=history["profit"].map(money),
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+    monthly = monthly_data(user_df)
+    if len(monthly) < 3:
+        with st.container(border=True):
+            st.markdown('<div class="section-title">📈 Your Forecast</div>', unsafe_allow_html=True)
+            st.info("Add transactions covering at least 3 months to generate a meaningful forecast.")
+        return
 
-    # XGBoost forecast
+    history = monthly.rename(columns={"month": "month", "Income": "income", "Expense": "expenses"})[["month", "income", "expenses", "Profit"]].copy()
+    history["month"] = pd.to_datetime(history["month"] + "-01", errors="coerce")
+    history = history.rename(columns={"Profit": "profit"}).dropna().reset_index(drop=True)
+
+    with st.container(border=True):
+        st.markdown('<div class="section-title">📊 Your Historical Financial Data</div>', unsafe_allow_html=True)
+        display = history.assign(
+            month=history["month"].dt.strftime("%b %Y"),
+            income=history["income"].map(money),
+            expenses=history["expenses"].map(money),
+            profit=history["profit"].map(money),
+        )
+        st.dataframe(display, width="stretch", hide_index=True)
+
     try:
         from xgboost import XGBRegressor
 
@@ -1867,20 +2303,15 @@ def forecast_page():
         data["income_lag_1"] = data["income"].shift(1)
         data["expenses_lag_1"] = data["expenses"].shift(1)
         data["profit_lag_1"] = data["profit"].shift(1)
-
         train = data.dropna().copy()
 
-        features = [
-            "year",
-            "month_number",
-            "income_lag_1",
-            "expenses_lag_1",
-            "profit_lag_1",
-        ]
+        if len(train) < 2:
+            st.info("Add more monthly transaction data before forecasting.")
+            return
 
+        features = ["year", "month_number", "income_lag_1", "expenses_lag_1", "profit_lag_1"]
         models = {}
-
-        for target in ["income", "expenses", "profit"]:
+        for target in ["income", "expenses"]:
             model = XGBRegressor(
                 n_estimators=100,
                 max_depth=3,
@@ -1893,50 +2324,34 @@ def forecast_page():
 
         latest = data.iloc[-1]
         next_month = latest["month"] + pd.DateOffset(months=1)
+        future = pd.DataFrame([{
+            "year": next_month.year,
+            "month_number": next_month.month,
+            "income_lag_1": latest["income"],
+            "expenses_lag_1": latest["expenses"],
+            "profit_lag_1": latest["profit"],
+        }])
 
-        future = pd.DataFrame(
-            [{
-                "year": next_month.year,
-                "month_number": next_month.month,
-                "income_lag_1": latest["income"],
-                "expenses_lag_1": latest["expenses"],
-                "profit_lag_1": latest["profit"],
-            }]
-        )
-
-        predicted_income = max(0, models["income"].predict(future)[0])
-        predicted_expenses = max(0, models["expenses"].predict(future)[0])
+        predicted_income = max(0, float(models["income"].predict(future)[0]))
+        predicted_expenses = max(0, float(models["expenses"].predict(future)[0]))
         predicted_profit = predicted_income - predicted_expenses
 
-        st.write("")
         p1, p2, p3 = st.columns(3)
-
-        p1.metric(
-            f"Predicted Income · {next_month.strftime('%b %Y')}",
-            money(predicted_income),
-        )
-        p2.metric(
-            "Predicted Expenses",
-            money(predicted_expenses),
-        )
-        p3.metric(
-            "Predicted Profit",
-            money(predicted_profit),
-        )
+        p1.metric(f"Predicted Income · {next_month.strftime('%b %Y')}", money(predicted_income))
+        p2.metric("Predicted Expenses", money(predicted_expenses))
+        p3.metric("Predicted Profit", money(predicted_profit))
 
         with st.container(border=True):
             st.markdown('<div class="section-title">Forecast Interpretation</div>', unsafe_allow_html=True)
             forecast_margin = (predicted_profit / predicted_income * 100) if predicted_income else 0
             st.markdown(
-                f'<div class="insight-box">📈 For {next_month.strftime("%B %Y")}, the model predicts '
+                f'<div class="insight-box">📈 For {next_month.strftime("%B %Y")}, MoneyFlow predicts '
                 f'<b>{money(predicted_income)}</b> income, <b>{money(predicted_expenses)}</b> expenses and '
                 f'<b>{money(predicted_profit)}</b> profit, implying a predicted profit margin of '
                 f'<b>{forecast_margin:.1f}%</b>.</div>',
                 unsafe_allow_html=True,
             )
-            st.caption(
-                "Forecast is based on the available historical dataset and should be presented as a development/demo forecast, not a guaranteed financial prediction."
-            )
+            st.caption("Forecast is calculated from the signed-in user's own transaction history. It is an estimate, not a guaranteed financial result.")
 
     except Exception as error:
         st.error(f"Forecast model could not run: {error}")
@@ -1952,73 +2367,58 @@ def risk_page(df):
         "Identify unusually large expenses and understand transaction risk.",
     )
 
-    risk_df, counts, overall = risk_analysis(df)
+    work = df.copy()
+    required = ["date", "description", "category", "type", "amount"]
+    for col in required:
+        if col not in work.columns:
+            work[col] = pd.Series(dtype="object")
+
+    if work.empty:
+        risk_df = work.copy()
+        risk_df["risk_level"] = pd.Series(dtype="object")
+        counts = {"High": 0, "Medium": 0, "Low": 0}
+        overall = "Low"
+    else:
+        work["date"] = pd.to_datetime(work["date"], errors="coerce")
+        work["amount"] = pd.to_numeric(work["amount"], errors="coerce")
+        work["type"] = work["type"].astype(str).str.strip().str.title()
+        work = work.dropna(subset=["amount"])
+        work = work[work["amount"] > 0].copy()
+        risk_df, counts, overall = risk_analysis(work)
 
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("Overall Risk", overall)
-    r2.metric("🔴 High", counts["High"])
-    r3.metric("🟠 Medium", counts["Medium"])
-    r4.metric("🟢 Low", counts["Low"])
+    r2.metric("🔴 High", counts.get("High", 0))
+    r3.metric("🟠 Medium", counts.get("Medium", 0))
+    r4.metric("🟢 Low", counts.get("Low", 0))
 
     st.write("")
-
     with st.container(border=True):
         st.markdown('<div class="section-title">Risk Distribution</div>', unsafe_allow_html=True)
-
-        chart_df = pd.DataFrame(
-            {
+        if work.empty:
+            st.info("Add expense transactions to see risk distribution.")
+        else:
+            chart_df = pd.DataFrame({
                 "Risk": ["High", "Medium", "Low"],
-                "Count": [
-                    counts["High"],
-                    counts["Medium"],
-                    counts["Low"],
-                ],
-            }
-        )
-
-        fig = px.bar(
-            chart_df,
-            x="Risk",
-            y="Count",
-            text="Count",
-        )
-
-        fig.update_layout(
-            height=300,
-            font=dict(family="Times New Roman, Times, serif", color="#172033", size=13),
-            margin=dict(l=10, r=10, t=20, b=10),
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            yaxis=dict(dtick=1, gridcolor="#e5e7eb"),
-        )
-
-        st.plotly_chart(fig, use_container_width=True, key="risk_distribution")
+                "Count": [int(counts.get("High", 0)), int(counts.get("Medium", 0)), int(counts.get("Low", 0))],
+            }).set_index("Risk")
+            # Native Streamlit chart avoids the browser freeze caused by the Plotly risk chart.
+            st.bar_chart(chart_df, height=300, width="stretch")
 
     with st.container(border=True):
         st.markdown('<div class="section-title">Flagged Transactions</div>', unsafe_allow_html=True)
-
         if risk_df.empty:
             st.info("No expense transactions available.")
         else:
-            flagged = risk_df[risk_df["risk_level"] != "Low"].copy()
-
+            flagged = risk_df[risk_df["risk_level"].isin(["High", "Medium"])].copy()
             if flagged.empty:
                 st.success("No medium/high-risk transactions detected.")
             else:
-                flagged["date"] = flagged["date"].dt.strftime("%Y-%m-%d")
+                flagged["date"] = pd.to_datetime(flagged["date"], errors="coerce").dt.strftime("%Y-%m-%d")
                 flagged["amount"] = flagged["amount"].map(money)
-
                 st.dataframe(
-                    flagged[
-                        [
-                            "date",
-                            "description",
-                            "category",
-                            "amount",
-                            "risk_level",
-                        ]
-                    ],
-                    use_container_width=True,
+                    flagged[["date", "description", "category", "amount", "risk_level"]],
+                    width="stretch",
                     hide_index=True,
                 )
 
