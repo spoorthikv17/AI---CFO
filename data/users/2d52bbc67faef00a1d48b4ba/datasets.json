@@ -1,0 +1,17 @@
+[
+  {
+    "id": "dataset_1",
+    "name": "Dataset 1",
+    "categories": [
+      "inventory",
+      "marketing",
+      "office",
+      "salaries",
+      "sales",
+      "software",
+      "travel",
+      "utilities"
+    ],
+    "rows": 5000
+  }
+]

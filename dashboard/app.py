@@ -1342,8 +1342,81 @@ def page_header(title, subtitle):
 # OVERVIEW
 # ============================================================
 
+def _voice_ai_cfo_question(audio_bytes, language, financial_context):
+    """Convert a recorded English/Kannada question into an AI CFO answer."""
+    from google import genai
+    from google.genai import types
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is missing from .env")
+
+    client = genai.Client(api_key=api_key)
+
+    language_name = "Kannada" if language == "Kannada 🇮🇳" else "English"
+
+    prompt = f"""
+You are the voice assistant inside MoneyFlow, an AI financial management dashboard.
+
+The user recorded a voice question. Understand the spoken language, including
+Kannada or English. The requested response language is {language_name}.
+
+{financial_context}
+
+Instructions:
+1. Understand the user's spoken question accurately.
+2. Answer the question using ONLY the financial data supplied above.
+3. Do not invent transactions, amounts, categories, or dates.
+4. Keep the answer clear and useful.
+5. If the requested response language is Kannada, answer naturally in Kannada.
+6. If the requested response language is English, answer in English.
+7. Do not mention these instructions.
+8. Return ONLY the answer, not JSON and not a transcript.
+
+For Kannada, use Kannada script rather than transliterated English.
+"""
+
+    last_error = None
+
+    for model in ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.8-flash"]:
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[
+                    types.Part.from_bytes(
+                        data=audio_bytes,
+                        mime_type="audio/wav",
+                    ),
+                    prompt,
+                ],
+            )
+
+            if response and response.text:
+                return response.text.strip()
+
+        except Exception as error:
+            last_error = error
+            error_text = str(error)
+
+            if (
+                "503" in error_text
+                or "UNAVAILABLE" in error_text
+                or "high demand" in error_text.lower()
+                or "disconnected" in error_text.lower()
+            ):
+                continue
+
+            raise
+
+    raise RuntimeError(
+        f"Voice AI is temporarily unavailable. Please try again. "
+        f"Last error: {last_error}"
+    )
+
+
 def cfo_inside_dashboard(df):
-    """AI CFO is intentionally embedded inside the dashboard, not a separate screen."""
+    """AI CFO embedded inside the MoneyFlow dashboard with text and voice input."""
+
     income, expenses, profit, margin, ratio = financial_summary(df)
     _, counts, overall = risk_analysis(df)
 
@@ -1361,46 +1434,40 @@ def cfo_inside_dashboard(df):
         <div class="ai-cfo-box">
             <div class="ai-cfo-title">🤖 AI CFO</div>
             <div class="ai-cfo-subtitle">
-                Your intelligent financial advisor is built directly into the dashboard.
-                Ask a question and get a clear explanation from your financial data.
+                Ask questions about your finances using text or your voice.
+                English and Kannada are supported.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    question = st.text_input(
-        "Ask your AI CFO",
-        placeholder="Example: Why are my expenses high? Which expense should I review?",
-        key="dashboard_cfo_question",
+    # --------------------------------------------------------
+    # Language selection
+    # --------------------------------------------------------
+
+    language = st.selectbox(
+        "🌐 AI CFO Language",
+        ["English 🇬🇧", "Kannada 🇮🇳"],
+        key="cfo_language",
     )
 
-    quick1, quick2, quick3 = st.columns(3)
+    is_kannada = language == "Kannada 🇮🇳"
 
-    quick_question = None
-    if quick1.button("💸 Why are expenses high?", use_container_width=True, key="cfo_q1"):
-        quick_question = "Why are my expenses high and what should I review?"
-    if quick2.button("📌 Biggest expense?", use_container_width=True, key="cfo_q2"):
-        quick_question = "What is my biggest expense and why does it matter?"
-    if quick3.button("🛡️ Explain my risk", use_container_width=True, key="cfo_q3"):
-        quick_question = "Explain my current financial risk in simple language."
+    if is_kannada:
+        placeholder = "ಉದಾಹರಣೆ: ಈ ತಿಂಗಳು ನಾನು ಎಷ್ಟು ಖರ್ಚು ಮಾಡಿದ್ದೇನೆ?"
+    else:
+        placeholder = "Example: How much did I spend this month?"
 
-    ask_clicked = st.button(
-        "✨ Ask AI CFO",
-        type="primary",
-        use_container_width=True,
-        key="ask_cfo_button",
-    )
-    final_question = quick_question or question
+    # --------------------------------------------------------
+    # Financial context shared by text and voice AI
+    # --------------------------------------------------------
 
-    if quick_question or ask_clicked:
-        if not final_question or not final_question.strip():
-            st.warning("Enter a question first.")
-        else:
-            context = f"""
+    financial_context = f"""
 You are the AI CFO inside MoneyFlow.
 
-Use only this financial data:
+Use ONLY this financial data:
+
 Total income: ₹{income:,.2f}
 Total expenses: ₹{expenses:,.2f}
 Net profit: ₹{profit:,.2f}
@@ -1412,6 +1479,178 @@ Medium-risk transactions: {counts["Medium"]}
 Low-risk transactions: {counts["Low"]}
 Largest expense category: {top_category}
 Largest expense amount: ₹{top_amount:,.2f}
+"""
+
+    # --------------------------------------------------------
+    # Text question
+    # --------------------------------------------------------
+
+    question = st.text_input(
+        "⌨️ Ask your AI CFO",
+        placeholder=placeholder,
+        key="dashboard_cfo_question",
+    )
+
+    # --------------------------------------------------------
+    # Voice recording
+    # --------------------------------------------------------
+
+    st.markdown("### 🎙️ Voice AI CFO")
+
+    if is_kannada:
+        st.caption("Kannada voice: ಕೆಳಗಿನ ಮೈಕ್ರೊಫೋನ್ ಬಳಸಿ ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಮಾತನಾಡಿ.")
+    else:
+        st.caption("English voice: Click the microphone and ask your financial question.")
+
+    audio_value = None
+
+    try:
+        audio_value = st.audio_input(
+            "🎙️ Record your question",
+            key="cfo_voice_input",
+        )
+    except AttributeError:
+        st.warning(
+            "Voice recording needs a newer Streamlit version. "
+            "Text AI CFO is still available."
+        )
+
+    # --------------------------------------------------------
+    # Quick questions
+    # --------------------------------------------------------
+
+    if is_kannada:
+        quick1_text = "💸 ಖರ್ಚುಗಳು ಏಕೆ ಹೆಚ್ಚಾಗಿವೆ?"
+        quick2_text = "📌 ಅತಿ ದೊಡ್ಡ ಖರ್ಚು ಯಾವುದು?"
+        quick3_text = "🛡️ ನನ್ನ ಅಪಾಯವನ್ನು ವಿವರಿಸಿ"
+
+        quick1_question = "ನನ್ನ ಖರ್ಚುಗಳು ಏಕೆ ಹೆಚ್ಚಾಗಿವೆ ಮತ್ತು ನಾನು ಯಾವುದನ್ನು ಪರಿಶೀಲಿಸಬೇಕು?"
+        quick2_question = "ನನ್ನ ಅತಿ ದೊಡ್ಡ ಖರ್ಚು ಯಾವುದು ಮತ್ತು ಅದು ಏಕೆ ಮುಖ್ಯ?"
+        quick3_question = "ನನ್ನ ಪ್ರಸ್ತುತ ಹಣಕಾಸಿನ ಅಪಾಯವನ್ನು ಸರಳವಾಗಿ ವಿವರಿಸಿ."
+    else:
+        quick1_text = "💸 Why are expenses high?"
+        quick2_text = "📌 Biggest expense?"
+        quick3_text = "🛡️ Explain my risk"
+
+        quick1_question = "Why are my expenses high and what should I review?"
+        quick2_question = "What is my biggest expense and why does it matter?"
+        quick3_question = "Explain my current financial risk in simple language."
+
+    quick1, quick2, quick3 = st.columns(3)
+
+    quick_question = None
+
+    if quick1.button(
+        quick1_text,
+        use_container_width=True,
+        key="cfo_q1",
+    ):
+        quick_question = quick1_question
+
+    if quick2.button(
+        quick2_text,
+        use_container_width=True,
+        key="cfo_q2",
+    ):
+        quick_question = quick2_question
+
+    if quick3.button(
+        quick3_text,
+        use_container_width=True,
+        key="cfo_q3",
+    ):
+        quick_question = quick3_question
+
+    # --------------------------------------------------------
+    # Ask text AI CFO
+    # --------------------------------------------------------
+
+    ask_clicked = st.button(
+        "✨ Ask AI CFO",
+        type="primary",
+        use_container_width=True,
+        key="ask_cfo_button",
+    )
+
+    # --------------------------------------------------------
+    # Voice AI CFO
+    # --------------------------------------------------------
+
+    voice_clicked = st.button(
+        "🎙️ Ask using Voice",
+        use_container_width=True,
+        key="ask_cfo_voice_button",
+    )
+
+    # --------------------------------------------------------
+    # Process voice question
+    # --------------------------------------------------------
+
+    if voice_clicked:
+
+        if audio_value is None:
+            st.warning(
+                "Please record a voice question first."
+                if not is_kannada
+                else "ಮೊದಲು ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ರೆಕಾರ್ಡ್ ಮಾಡಿ."
+            )
+
+        else:
+            try:
+                audio_bytes = audio_value.getvalue()
+
+                if not audio_bytes:
+                    raise ValueError("The voice recording is empty.")
+
+                with st.spinner(
+                    "AI CFO is listening and preparing your answer..."
+                    if not is_kannada
+                    else "AI CFO ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಕೇಳುತ್ತಿದೆ..."
+                ):
+                    response = _voice_ai_cfo_question(
+                        audio_bytes,
+                        language,
+                        financial_context,
+                    )
+
+                st.markdown(
+                    f'<div class="insight-box">🧠 <b>'
+                    f'{"CFO ಉತ್ತರ" if is_kannada else "CFO Analysis"}'
+                    f'</b><br><br>{response}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            except Exception as error:
+                st.error(
+                    f"Voice AI could not process the recording: {error}"
+                )
+
+    # --------------------------------------------------------
+    # Process typed / quick question
+    # --------------------------------------------------------
+
+    final_question = quick_question or question
+
+    if quick_question or ask_clicked:
+
+        if not final_question or not final_question.strip():
+
+            st.warning(
+                "Enter a question first."
+                if not is_kannada
+                else "ಮೊದಲು ಒಂದು ಪ್ರಶ್ನೆಯನ್ನು ನಮೂದಿಸಿ."
+            )
+
+        else:
+
+            response_language = (
+                "Kannada" if is_kannada else "English"
+            )
+
+            context = f"""
+{financial_context}
+
+The user wants the answer in {response_language}.
 
 Answer the user's question in simple language.
 Explain the reasoning using the numbers.
@@ -1421,59 +1660,130 @@ Do not invent transactions.
 User question:
 {final_question}
 """
+
             try:
+
                 from src.ai_engine import ask_gemini
 
-                with st.spinner("AI CFO is analysing your financial data..."):
+                with st.spinner(
+                    "AI CFO is analysing your financial data..."
+                    if not is_kannada
+                    else "AI CFO ನಿಮ್ಮ ಹಣಕಾಸಿನ ಮಾಹಿತಿಯನ್ನು ವಿಶ್ಲೇಷಿಸುತ್ತಿದೆ..."
+                ):
                     response = ask_gemini(context)
 
                 st.markdown(
-                    f'<div class="insight-box">🧠 <b>CFO Analysis</b><br><br>{response}</div>',
-                    unsafe_allow_html=True,
-                )
-            except Exception as error:
-                # Keep the app answerable even if Gemini is temporarily unavailable.
-                q = final_question.lower()
-                if "biggest" in q or "largest" in q:
-                    fallback = (
-                        f"Your largest expense category is {top_category} at {money(top_amount)}. "
-                        f"Total expenses are {money(expenses)}, so this category is the first area to review "
-                        f"when checking where most spending is concentrated."
-                    )
-                elif "risk" in q or "anomal" in q:
-                    fallback = (
-                        f"Your current transaction risk level is {overall}. "
-                        f"MoneyFlow detected {counts['High']} high-risk, {counts['Medium']} medium-risk "
-                        f"and {counts['Low']} low-risk expense transactions. "
-                        f"Review any high- or medium-risk transactions first."
-                    )
-                elif "expense" in q or "spend" in q or "cost" in q:
-                    fallback = (
-                        f"Your total expenses are {money(expenses)}, equal to {ratio:.1f}% of income. "
-                        f"The largest expense category is {top_category} at {money(top_amount)}. "
-                        f"That category is the most useful place to begin reviewing costs."
-                    )
-                elif "profit" in q or "margin" in q:
-                    fallback = (
-                        f"Your current net profit is {money(profit)} from income of {money(income)} "
-                        f"and expenses of {money(expenses)}. Your profit margin is {margin:.1f}%."
-                    )
-                elif "income" in q or "revenue" in q:
-                    fallback = (
-                        f"Your total income is {money(income)}. After {money(expenses)} in expenses, "
-                        f"MoneyFlow calculates a net profit of {money(profit)}."
-                    )
-                else:
-                    fallback = (
-                        f"Based on the current MoneyFlow data: income is {money(income)}, expenses are "
-                        f"{money(expenses)}, net profit is {money(profit)}, profit margin is {margin:.1f}%, "
-                        f"expense ratio is {ratio:.1f}%, and overall transaction risk is {overall}."
-                    )
-                st.markdown(
-                    f'<div class="insight-box">🧠 <b>CFO Analysis</b><br><br>{fallback}</div>',
+                    f'<div class="insight-box">🧠 <b>'
+                    f'{"CFO ಉತ್ತರ" if is_kannada else "CFO Analysis"}'
+                    f'</b><br><br>{response}</div>',
                     unsafe_allow_html=True,
                 )
 
+            except Exception:
+
+                # Local fallback so the dashboard remains useful
+                q = final_question.lower()
+
+                if (
+                    "biggest" in q
+                    or "largest" in q
+                    or "ಅತಿ ದೊಡ್ಡ" in q
+                ):
+                    if is_kannada:
+                        fallback = (
+                            f"ನಿಮ್ಮ ಅತಿ ದೊಡ್ಡ ಖರ್ಚಿನ ವರ್ಗ "
+                            f"{top_category}, ಅದರ ಮೊತ್ತ ₹{top_amount:,.2f}. "
+                            f"ನಿಮ್ಮ ಒಟ್ಟು ಖರ್ಚು ₹{expenses:,.2f}."
+                        )
+                    else:
+                        fallback = (
+                            f"Your largest expense category is "
+                            f"{top_category} at {money(top_amount)}. "
+                            f"Total expenses are {money(expenses)}."
+                        )
+
+                elif (
+                    "risk" in q
+                    or "anomal" in q
+                    or "ಅಪಾಯ" in q
+                ):
+                    if is_kannada:
+                        fallback = (
+                            f"ನಿಮ್ಮ ಪ್ರಸ್ತುತ ಹಣಕಾಸಿನ ಅಪಾಯದ ಮಟ್ಟ "
+                            f"{overall}. High-risk: {counts['High']}, "
+                            f"Medium-risk: {counts['Medium']}, "
+                            f"Low-risk: {counts['Low']}."
+                        )
+                    else:
+                        fallback = (
+                            f"Your current transaction risk level is {overall}. "
+                            f"High-risk: {counts['High']}, "
+                            f"Medium-risk: {counts['Medium']}, "
+                            f"Low-risk: {counts['Low']}."
+                        )
+
+                elif (
+                    "expense" in q
+                    or "spend" in q
+                    or "cost" in q
+                    or "ಖರ್ಚು" in q
+                ):
+                    if is_kannada:
+                        fallback = (
+                            f"ನಿಮ್ಮ ಒಟ್ಟು ಖರ್ಚು ₹{expenses:,.2f}. "
+                            f"ಇದು ನಿಮ್ಮ ಆದಾಯದ {ratio:.1f}% ಆಗಿದೆ. "
+                            f"ಅತಿ ದೊಡ್ಡ ಖರ್ಚಿನ ವರ್ಗ {top_category}."
+                        )
+                    else:
+                        fallback = (
+                            f"Your total expenses are {money(expenses)}, "
+                            f"equal to {ratio:.1f}% of income. "
+                            f"The largest expense category is {top_category}."
+                        )
+
+                elif (
+                    "profit" in q
+                    or "margin" in q
+                    or "ಲಾಭ" in q
+                ):
+                    if is_kannada:
+                        fallback = (
+                            f"ನಿಮ್ಮ ನಿವ್ವಳ ಲಾಭ ₹{profit:,.2f}. "
+                            f"ಒಟ್ಟು ಆದಾಯ ₹{income:,.2f} ಮತ್ತು "
+                            f"ಒಟ್ಟು ಖರ್ಚು ₹{expenses:,.2f}. "
+                            f"ಲಾಭದ ಪ್ರಮಾಣ {margin:.1f}%."
+                        )
+                    else:
+                        fallback = (
+                            f"Your current net profit is {money(profit)} "
+                            f"from income of {money(income)} and "
+                            f"expenses of {money(expenses)}. "
+                            f"Your profit margin is {margin:.1f}%."
+                        )
+
+                else:
+                    if is_kannada:
+                        fallback = (
+                            f"ನಿಮ್ಮ ಒಟ್ಟು ಆದಾಯ ₹{income:,.2f}, "
+                            f"ಒಟ್ಟು ಖರ್ಚು ₹{expenses:,.2f}, "
+                            f"ನಿವ್ವಳ ಲಾಭ ₹{profit:,.2f} ಮತ್ತು "
+                            f"ಲಾಭದ ಪ್ರಮಾಣ {margin:.1f}%."
+                        )
+                    else:
+                        fallback = (
+                            f"Based on your current MoneyFlow data: "
+                            f"income is {money(income)}, expenses are "
+                            f"{money(expenses)}, net profit is "
+                            f"{money(profit)}, and profit margin is "
+                            f"{margin:.1f}%."
+                        )
+
+                st.markdown(
+                    f'<div class="insight-box">🧠 <b>'
+                    f'{"CFO ಉತ್ತರ" if is_kannada else "CFO Analysis"}'
+                    f'</b><br><br>{fallback}</div>',
+                    unsafe_allow_html=True,
+                )
 
 def get_time_greeting():
     """Return a greeting based on the user's local time."""
@@ -2018,36 +2328,332 @@ def data_import_page():
         st.markdown('<div class="section-title">1. Upload Financial Dataset</div>', unsafe_allow_html=True)
 
         uploaded = st.file_uploader(
-            "Choose a financial dataset",
-            type=["xlsx", "xls", "csv", "pdf"],
-            help="Required columns: date, description, category, type and amount.",
+            "Choose a financial dataset or receipt photo",
+            type=[
+                "xlsx",
+                "xls",
+                "csv",
+                "pdf",
+                "jpg",
+                "jpeg",
+                "png",
+                "webp",
+            ],
+            help=(
+                "Upload CSV, Excel or PDF financial datasets, "
+                "or JPG/JPEG/PNG/WEBP receipt photos."
+            ),
             key="financial_dataset_uploader",
         )
 
         if uploaded:
             st.success(f"Uploaded: {uploaded.name}")
             suffix = Path(uploaded.name).suffix.lower()
-            try:
-                if suffix == ".csv":
-                    imported_df = pd.read_csv(uploaded)
-                elif suffix in [".xlsx", ".xls"]:
-                    imported_df = pd.read_excel(uploaded)
-                elif suffix == ".pdf":
-                    imported_df = _read_pdf_dataset(uploaded)
-                else:
-                    imported_df = None
 
-                if imported_df is not None:
-                    st.session_state["imported_dataset"] = imported_df.copy()
-                    st.session_state["imported_filename"] = uploaded.name
-            except Exception as error:
-                st.error(f"Could not read the dataset: {error}")
+            # --------------------------------------------------------
+            # RECEIPT PHOTO
+            # --------------------------------------------------------
+            if suffix in [".jpg", ".jpeg", ".png", ".webp"]:
+                st.markdown("### 📷 Receipt Photo")
+                st.image(
+                    uploaded,
+                    caption=uploaded.name,
+                    use_container_width=True,
+                )
+
+                st.info(
+                    "MoneyFlow can read this receipt photo with AI and "
+                    "turn the extracted total into an expense transaction."
+                )
+
+                if st.button(
+                    "🤖 Analyze Receipt with AI",
+                    type="primary",
+                    use_container_width=True,
+                    key="analyze_receipt_photo",
+                ):
+                    try:
+                        upload_dir = DATA_DIR / "raw_receipts"
+                        upload_dir.mkdir(parents=True, exist_ok=True)
+
+                        safe_name = (
+                            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+                            f"{Path(uploaded.name).name}"
+                        )
+                        file_path = upload_dir / safe_name
+
+                        with open(file_path, "wb") as file:
+                            file.write(uploaded.getbuffer())
+
+                        from src.document_analyzer import analyze_document
+
+                        with st.spinner("🤖 AI is analyzing the receipt..."):
+                            result = analyze_document(str(file_path))
+
+                        if not isinstance(result, dict):
+                            raise ValueError(
+                                "AI returned an invalid receipt response."
+                            )
+
+                        st.session_state["receipt_analysis"] = result
+                        st.session_state["receipt_filename"] = uploaded.name
+                        st.session_state["receipt_file_path"] = str(file_path)
+
+                    except Exception as error:
+                        st.error(
+                            f"Could not analyze the receipt: {error}"
+                        )
+
+            # --------------------------------------------------------
+            # NORMAL FINANCIAL DATASET
+            # --------------------------------------------------------
+            else:
+                try:
+                    if suffix == ".csv":
+                        imported_df = pd.read_csv(uploaded)
+                    elif suffix in [".xlsx", ".xls"]:
+                        imported_df = pd.read_excel(uploaded)
+                    elif suffix == ".pdf":
+                        imported_df = _read_pdf_dataset(uploaded)
+                    else:
+                        imported_df = None
+
+                    if imported_df is not None:
+                        st.session_state["imported_dataset"] = imported_df.copy()
+                        st.session_state["imported_filename"] = uploaded.name
+                except Exception as error:
+                    st.error(f"Could not read the dataset: {error}")
+
+    # ================================================================
+    # RECEIPT ANALYSIS RESULT
+    # ================================================================
+
+    receipt_result = st.session_state.get("receipt_analysis")
+
+    if receipt_result is not None:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="section-title">2. Verify Receipt Details</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.success(
+                "✅ Receipt analyzed. Please verify the extracted values before saving."
+            )
+
+            left, right = st.columns(2)
+
+            with left:
+                receipt_vendor = st.text_input(
+                    "Vendor / Store",
+                    value=str(receipt_result.get("vendor") or ""),
+                    key="receipt_vendor",
+                )
+
+                receipt_date = st.text_input(
+                    "Date",
+                    value=str(receipt_result.get("date") or ""),
+                    key="receipt_date",
+                )
+
+                receipt_category = st.text_input(
+                    "Category",
+                    value=str(
+                        receipt_result.get("category") or "Other"
+                    ),
+                    key="receipt_category",
+                )
+
+                receipt_payment = st.text_input(
+                    "Payment Method",
+                    value=str(
+                        receipt_result.get("payment_method") or ""
+                    ),
+                    key="receipt_payment_method",
+                )
+
+            with right:
+                receipt_invoice = st.text_input(
+                    "Invoice Number",
+                    value=str(
+                        receipt_result.get("invoice_number") or ""
+                    ),
+                    key="receipt_invoice_number",
+                )
+
+                receipt_subtotal = st.number_input(
+                    "Subtotal",
+                    min_value=0.0,
+                    value=float(receipt_result.get("subtotal") or 0),
+                    step=1.0,
+                    key="receipt_subtotal",
+                )
+
+                receipt_tax = st.number_input(
+                    "Tax / GST",
+                    min_value=0.0,
+                    value=float(receipt_result.get("tax") or 0),
+                    step=1.0,
+                    key="receipt_tax",
+                )
+
+                receipt_total = st.number_input(
+                    "Final Total",
+                    min_value=0.0,
+                    value=float(receipt_result.get("total") or 0),
+                    step=1.0,
+                    key="receipt_total",
+                )
+
+            receipt_notes = st.text_area(
+                "Notes",
+                value=str(receipt_result.get("notes") or ""),
+                key="receipt_notes",
+            )
+
+            confidence = receipt_result.get("confidence")
+            if confidence is not None:
+                try:
+                    confidence_value = float(confidence)
+                    if confidence_value <= 1:
+                        confidence_value *= 100
+                    st.metric(
+                        "AI Confidence",
+                        f"{confidence_value:.1f}%",
+                    )
+                except Exception:
+                    pass
+
+            st.markdown("### 🛒 Extracted Items")
+
+            items = receipt_result.get("items") or []
+            if items:
+                st.dataframe(
+                    pd.DataFrame(items),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No individual items were detected.")
+
+            st.warning(
+                "Verify the extracted information before saving it."
+            )
+
+            save_col, remove_col = st.columns(2)
+
+            with save_col:
+                if st.button(
+                    "💾 Save Receipt as Expense",
+                    type="primary",
+                    use_container_width=True,
+                    key="save_receipt_as_expense",
+                ):
+                    if receipt_total <= 0:
+                        st.error(
+                            "Final total must be greater than zero."
+                        )
+                    else:
+                        try:
+                            parsed_date = pd.to_datetime(
+                                receipt_date,
+                                errors="coerce",
+                            )
+
+                            if pd.isna(parsed_date):
+                                parsed_date = pd.Timestamp.now()
+
+                            current_df = load_transactions()
+
+                            if current_df.empty:
+                                next_id = 1
+                            else:
+                                ids = pd.to_numeric(
+                                    current_df["id"],
+                                    errors="coerce",
+                                )
+                                next_id = (
+                                    int(ids.max()) + 1
+                                    if ids.notna().any()
+                                    else len(current_df) + 1
+                                )
+
+                            new_row = pd.DataFrame(
+                                [{
+                                    "id": next_id,
+                                    "date": parsed_date,
+                                    "description": (
+                                        receipt_vendor.strip()
+                                        or "Receipt Expense"
+                                    ),
+                                    "category": (
+                                        receipt_category.strip()
+                                        or "Other"
+                                    ),
+                                    "type": "Expense",
+                                    "amount": float(receipt_total),
+                                }]
+                            )
+
+                            combined_df = pd.concat(
+                                [current_df, new_row],
+                                ignore_index=True,
+                            )
+
+                            save_transactions(combined_df)
+
+                            st.session_state.pop(
+                                "receipt_analysis",
+                                None,
+                            )
+                            st.session_state.pop(
+                                "receipt_filename",
+                                None,
+                            )
+                            st.session_state.pop(
+                                "receipt_file_path",
+                                None,
+                            )
+
+                            st.success(
+                                "✅ Receipt saved as an expense transaction."
+                            )
+                            st.rerun()
+
+                        except Exception as error:
+                            st.error(
+                                f"Could not save receipt: {error}"
+                            )
+
+            with remove_col:
+                if st.button(
+                    "✖ Remove Receipt",
+                    use_container_width=True,
+                    key="remove_receipt_analysis",
+                ):
+                    st.session_state.pop(
+                        "receipt_analysis",
+                        None,
+                    )
+                    st.session_state.pop(
+                        "receipt_filename",
+                        None,
+                    )
+                    st.session_state.pop(
+                        "receipt_file_path",
+                        None,
+                    )
+                    st.rerun()
+
+    # ================================================================
+    # NORMAL DATASET PREVIEW / VALIDATION
+    # ================================================================
 
     imported_df = st.session_state.get("imported_dataset")
 
     if imported_df is not None:
         with st.container(border=True):
-            st.markdown('<div class="section-title">2. Preview & Validate</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">3. Preview & Validate Dataset</div>', unsafe_allow_html=True)
             st.dataframe(imported_df, use_container_width=True, height=300, hide_index=True)
 
             normalized = imported_df.copy()
@@ -2147,7 +2753,7 @@ def data_import_page():
                     st.rerun()
 
     with st.container(border=True):
-        st.markdown('<div class="section-title">3. Current Dataset</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">4. Current Dataset</div>', unsafe_allow_html=True)
         current = load_transactions()
         datasets = _read_datasets(identifier)
         active = next((x for x in datasets if x.get("id") == _active_dataset_id(identifier)), None)
