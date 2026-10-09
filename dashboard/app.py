@@ -2,6 +2,7 @@ import os
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import smtplib
 from email.message import EmailMessage
@@ -919,10 +920,12 @@ def save_transactions(df):
 
 def _merge_into_dataset(dataset_id, clean, identifier=None):
     existing = _load_dataset_by_id(dataset_id, identifier)
-    combined = pd.concat([existing, clean], ignore_index=True)
+    combined = pd.concat([existing, clean], ignore_index=True, sort=False)
     combined = combined.drop_duplicates(subset=["date", "description", "category", "type", "amount"]).copy()
     combined["id"] = range(1, len(combined) + 1)
-    combined = combined[["id", "date", "description", "category", "type", "amount"]]
+    base = ["id", "date", "description", "category", "type", "amount"]
+    extras = [col for col in combined.columns if col not in base]
+    combined = combined[base + extras]
     combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
     combined.to_csv(_dataset_file(dataset_id, identifier), index=False)
     return combined
@@ -940,7 +943,9 @@ def _create_dataset(clean, name, identifier=None):
     dataset_id = f"dataset_{secrets.token_hex(6)}"
     clean = clean.copy()
     clean["id"] = range(1, len(clean) + 1)
-    clean = clean[["id", "date", "description", "category", "type", "amount"]]
+    base_columns = ["id", "date", "description", "category", "type", "amount"]
+    extra_columns = [column for column in clean.columns if column not in base_columns]
+    clean = clean[base_columns + extra_columns]
     clean.to_csv(_dataset_file(dataset_id, identifier), index=False)
     datasets.append({
         "id": dataset_id,
@@ -1414,6 +1419,138 @@ For Kannada, use Kannada script rather than transliterated English.
     )
 
 
+def _render_cfo_speech(response, is_kannada=False):
+    """Render reliable browser speech controls and clean the answer before speaking."""
+    import streamlit.components.v1 as components
+
+    answer_json = json.dumps(str(response or ""), ensure_ascii=False)
+    language_code = "kn-IN" if is_kannada else "en-IN"
+    listen_label = "🔊 ಉತ್ತರವನ್ನು ಕೇಳಿ" if is_kannada else "🔊 Listen to AI CFO answer"
+    stop_label = "⏹️ ನಿಲ್ಲಿಸಿ" if is_kannada else "⏹️ Stop speaking"
+    unavailable_message = (
+        "ಈ ಬ್ರೌಸರ್‌ನಲ್ಲಿ ಕನ್ನಡ ಧ್ವನಿ ಲಭ್ಯವಿಲ್ಲ."
+        if is_kannada
+        else "Speech is unavailable in this browser. Try Chrome or Edge."
+    )
+    labels_json = json.dumps(
+        {"listen": listen_label, "stop": stop_label, "unavailable": unavailable_message,
+         "loading": "Preparing voice…" if not is_kannada else "ಧ್ವನಿಯನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗುತ್ತಿದೆ…"},
+        ensure_ascii=False,
+    )
+
+    # Use a plain JS template and replace tokens so JavaScript regex braces are not
+    # accidentally interpreted by Python f-string formatting.
+    html = r"""<!doctype html>
+<html><meta charset="utf-8"><body style="margin:0;font-family:Arial,sans-serif">
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+  <button id="mf-speak" style="border:0;border-radius:10px;padding:10px 16px;cursor:pointer;font-weight:600">__LISTEN__</button>
+  <button id="mf-stop" style="border:0;border-radius:10px;padding:10px 16px;cursor:pointer">__STOP__</button>
+  <span id="mf-speech-status" style="font:13px sans-serif"></span>
+</div>
+<script>
+(() => {
+  const rawAnswer = __ANSWER__;
+  const lang = __LANG__;
+  const labels = __LABELS__;
+  const status = document.getElementById('mf-speech-status');
+  const speakButton = document.getElementById('mf-speak');
+  const stopButton = document.getElementById('mf-stop');
+
+  function cleanForSpeech(value) {
+    let text = String(value || '');
+    text = text.replace(/```[\s\S]*?```/g, ' ');
+    text = text.replace(/`([^`]*)`/g, '$1');
+    text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
+    text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
+    text = text.replace(/^\s*[-*+]\s+/gm, '');
+    text = text.replace(/^\s*\d+[.)]\s+/gm, '');
+    text = text.replace(/\*\*(.*?)\*\*/g, '$1');
+    text = text.replace(/__(.*?)__/g, '$1');
+    text = text.replace(/~~(.*?)~~/g, '$1');
+    text = text.replace(/₹\s?(?=[\d])/g, ' rupees ');
+    text = text.replace(/\bINR\b/gi, ' rupees ');
+    text = text.replace(/(?<=\d),(?=\d)/g, '');
+    text = text.replace(/%(?=\s|$|[.,])/g, ' percent');
+    text = text.replace(/&/g, ' and ');
+    text = text.replace(/[\*_~#>|]/g, ' ');
+    text = text.replace(/[=]+/g, ' ');
+    text = text.replace(/\s+/g, ' ').trim();
+    return text;
+  }
+
+  function getVoices() {
+    return new Promise(resolve => {
+      let voices = window.speechSynthesis.getVoices();
+      if (voices.length) return resolve(voices);
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        window.speechSynthesis.removeEventListener('voiceschanged', changed);
+        resolve(window.speechSynthesis.getVoices());
+      };
+      const changed = () => done();
+      window.speechSynthesis.addEventListener('voiceschanged', changed);
+      setTimeout(done, 1200);
+    });
+  }
+
+  speakButton.addEventListener('click', async () => {
+    if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {
+      status.textContent = labels.unavailable;
+      return;
+    }
+    const answer = cleanForSpeech(rawAnswer);
+    if (!answer) { status.textContent = labels.unavailable; return; }
+    window.speechSynthesis.cancel();
+    status.textContent = labels.loading;
+    const voices = await getVoices();
+    const prefix = lang.split('-')[0].toLowerCase();
+    const voice = voices.find(v => v.lang.toLowerCase() === lang.toLowerCase())
+      || voices.find(v => v.lang.toLowerCase().startsWith(prefix));
+    if (lang.startsWith('kn') && !voice) {
+      status.textContent = labels.unavailable;
+      return;
+    }
+    // Split long answers into short utterances for browsers that stop long speech.
+    const chunks = answer.match(/[^.!?।]+[.!?।]*/g) || [answer];
+    const queue = chunks.map(part => part.trim()).filter(Boolean);
+    if (!queue.length) { status.textContent = labels.unavailable; return; }
+    let index = 0;
+    const speakNext = () => {
+      if (index >= queue.length) { status.textContent = ''; return; }
+      const utterance = new SpeechSynthesisUtterance(queue[index++]);
+      utterance.lang = lang;
+      utterance.rate = 0.92;
+      utterance.pitch = 1;
+      if (voice) utterance.voice = voice;
+      utterance.onend = speakNext;
+      utterance.onerror = () => { status.textContent = labels.unavailable; };
+      window.speechSynthesis.speak(utterance);
+    };
+    status.textContent = '';
+    speakNext();
+  });
+  stopButton.addEventListener('click', () => {
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    status.textContent = '';
+  });
+})();
+</script></body></html>"""
+    html = (html.replace('__LISTEN__', listen_label)
+                .replace('__STOP__', stop_label)
+                .replace('__ANSWER__', answer_json)
+                .replace('__LANG__', json.dumps(language_code))
+                .replace('__LABELS__', labels_json))
+    components.html(html, height=64, scrolling=False)
+
+
+def _clear_cfo_voice_input():
+    """Clear the recorded voice question from the Streamlit audio widget."""
+    st.session_state.pop("cfo_voice_input", None)
+
+
 def cfo_inside_dashboard(df):
     """AI CFO embedded inside the MoneyFlow dashboard with text and voice input."""
 
@@ -1514,6 +1651,16 @@ Largest expense amount: ₹{top_amount:,.2f}
             "Voice recording needs a newer Streamlit version. "
             "Text AI CFO is still available."
         )
+
+    # Keep a delete option directly below the voice recorder. The callback runs
+    # before the next script rerun, so it can safely clear the widget state.
+    delete_label = "🗑️ ರೆಕಾರ್ಡಿಂಗ್ ಅಳಿಸಿ" if is_kannada else "🗑️ Delete recording"
+    st.button(
+        delete_label,
+        key="delete_cfo_voice_recording",
+        on_click=_clear_cfo_voice_input,
+        use_container_width=False,
+    )
 
     # --------------------------------------------------------
     # Quick questions
@@ -1619,6 +1766,7 @@ Largest expense amount: ₹{top_amount:,.2f}
                     f'</b><br><br>{response}</div>',
                     unsafe_allow_html=True,
                 )
+                _render_cfo_speech(response, is_kannada)
 
             except Exception as error:
                 st.error(
@@ -1678,6 +1826,7 @@ User question:
                     f'</b><br><br>{response}</div>',
                     unsafe_allow_html=True,
                 )
+                _render_cfo_speech(response, is_kannada)
 
             except Exception:
 
@@ -1784,6 +1933,7 @@ User question:
                     f'</b><br><br>{fallback}</div>',
                     unsafe_allow_html=True,
                 )
+                _render_cfo_speech(fallback, is_kannada)
 
 def get_time_greeting():
     """Return a greeting based on the user's local time."""
@@ -2222,6 +2372,215 @@ def _read_pdf_dataset(uploaded_file):
     return pd.DataFrame(body, columns=header)
 
 
+def _canonicalize_import_columns(frame):
+    """Normalize common spreadsheet column variants while preserving extra columns."""
+    out = frame.copy()
+    original_columns = list(out.columns)
+    normalized_columns = [
+        str(column).strip().lower().replace("\\n", " ").replace(" ", "_")
+        for column in original_columns
+    ]
+    out.columns = normalized_columns
+
+    aliases = {
+        "transactiondate": "date", "transaction_date": "date", "sale_date": "date",
+        "details": "description", "particulars": "description", "narration": "description",
+        "expensecategory": "category", "productcategory": "category", "product_category": "category",
+        "transactiontype": "type", "transaction_type": "type",
+        "value": "amount", "transactionamount": "amount", "transaction_amount": "amount",
+        "totalamount": "amount", "total_amount": "amount",
+        "productname": "product_name", "product_name": "product_name",
+        "itemname": "product_name", "item_name": "product_name",
+        "unitsold": "units_sold", "quantitysold": "units_sold", "quantity_sold": "units_sold",
+        "salesrevenueinr": "sales_revenue_inr", "sales_revenue_inr": "sales_revenue_inr",
+        "unit_selling_price_inr": "unit_selling_price", "unitsellingpriceinr": "unit_selling_price",
+        "unitcostinr": "unit_cost", "unit_cost_inr": "unit_cost",
+        "stockreceived": "stock_received", "quantityreceived": "stock_received",
+        "closingstock": "closing_stock", "stockstatus": "stock_status",
+        "productsku": "sku", "itemsku": "sku",
+    }
+    rename = {}
+    for col in out.columns:
+        compact = col.replace("_", "").replace("-", "")
+        if col in aliases:
+            rename[col] = aliases[col]
+        elif compact in aliases:
+            rename[col] = aliases[compact]
+    out = out.rename(columns=rename)
+    # Resolve duplicate canonical columns safely by keeping the first non-empty value.
+    if out.columns.duplicated().any():
+        merged = {}
+        for col in dict.fromkeys(out.columns):
+            same = out.loc[:, out.columns == col]
+            merged[col] = same.bfill(axis=1).iloc[:, 0] if same.shape[1] > 1 else same.iloc[:, 0]
+        out = pd.DataFrame(merged)
+    return out
+
+
+def _read_excel_financial_dataset(uploaded_file):
+    """Read the best matching workbook sheet; convert shop Daily_Sales when needed."""
+    uploaded_file.seek(0)
+    workbook = pd.ExcelFile(uploaded_file)
+    sheets = {}
+    for sheet_name in workbook.sheet_names:
+        try:
+            raw = pd.read_excel(workbook, sheet_name=sheet_name)
+            if not raw.empty:
+                sheets[sheet_name] = _canonicalize_import_columns(raw)
+        except Exception:
+            continue
+
+    required = {"date", "description", "category", "type", "amount"}
+    # Prefer a real transaction sheet, rather than a Read_Me/instructions sheet.
+    preferred_names = ["Transactions", "transactions", "Transaction", "transaction"]
+    ordered_names = sorted(sheets, key=lambda n: (0 if n in preferred_names else 1, list(sheets).index(n)))
+    for sheet_name in ordered_names:
+        frame = sheets[sheet_name]
+        if required.issubset(set(frame.columns)):
+            return frame
+
+    # If this is the original shop workbook, convert product daily sales to transactions
+    # and include shop expenses so the financial dashboard can import it too.
+    daily = None
+    for sheet_name, frame in sheets.items():
+        cols = set(frame.columns)
+        if {"date", "product_name", "units_sold"}.issubset(cols) and (
+            "sales_revenue_inr" in cols or "amount" in cols
+        ):
+            daily = frame.copy()
+            break
+
+    if daily is None:
+        available = "; ".join(f"{name}: {', '.join(map(str, frame.columns[:8]))}" for name, frame in sheets.items())
+        raise ValueError(
+            "Could not find a Transactions sheet or a Daily_Sales sheet in this workbook. "
+            "Expected columns date, description, category, type, amount. "
+            f"Sheets found: {available or 'none'}"
+        )
+
+    revenue_col = "sales_revenue_inr" if "sales_revenue_inr" in daily.columns else "amount"
+    daily_transactions = pd.DataFrame({
+        "date": daily["date"],
+        "description": "Product sale: " + daily["product_name"].fillna("Unknown product").astype(str),
+        "category": daily["category"] if "category" in daily.columns else "Sales",
+        "type": "Income",
+        "amount": daily[revenue_col],
+    })
+    optional_map = {
+        "product_name": "product_name", "sku": "sku", "units_sold": "units_sold",
+        "unit_selling_price": "unit_selling_price", "stock_received": "stock_received",
+        "closing_stock": "closing_stock", "stock_status": "stock_status", "supplier": "supplier",
+    }
+    for source, target in optional_map.items():
+        if source in daily.columns:
+            daily_transactions[target] = daily[source].values
+
+    expenses = None
+    for sheet_name, frame in sheets.items():
+        cols = set(frame.columns)
+        if {"date", "expense_name", "amount_inr"}.issubset(cols):
+            expenses = frame.copy()
+            break
+        if {"date", "expense_name", "amount"}.issubset(cols):
+            expenses = frame.copy()
+            break
+    if expenses is not None:
+        exp_amount_col = "amount_inr" if "amount_inr" in expenses.columns else "amount"
+        exp = pd.DataFrame({
+            "date": expenses["date"],
+            "description": expenses["expense_name"].astype(str),
+            "category": expenses["category"] if "category" in expenses.columns else "Shop Expense",
+            "type": "Expense",
+            "amount": expenses[exp_amount_col],
+        })
+        daily_transactions = pd.concat([daily_transactions, exp], ignore_index=True, sort=False)
+    return daily_transactions
+
+
+def _render_product_demand_forecast(transactions):
+    """Forecast product demand and prioritize restocking from imported shop data."""
+    if transactions is None or transactions.empty or "product_name" not in transactions.columns:
+        return
+    product_rows = transactions[transactions["product_name"].notna()].copy()
+    if product_rows.empty:
+        return
+
+    product_rows["date"] = pd.to_datetime(product_rows["date"], errors="coerce")
+    product_rows["units_sold"] = pd.to_numeric(product_rows.get("units_sold"), errors="coerce")
+    product_rows = product_rows.dropna(subset=["date", "units_sold", "product_name"])
+    product_rows = product_rows[product_rows["units_sold"] >= 0]
+    if product_rows.empty:
+        return
+
+    product_rows["month_date"] = product_rows["date"].dt.to_period("M").dt.to_timestamp()
+    monthly = (product_rows.groupby(["product_name", "month_date"], as_index=False)
+               .agg(units_sold=("units_sold", "sum")))
+    if monthly.empty:
+        return
+    last_month = monthly["month_date"].max()
+    next_month = last_month + pd.DateOffset(months=1)
+    rows = []
+    for product, group in monthly.groupby("product_name"):
+        group = group.sort_values("month_date")
+        # Fill missing months for a fair recent-demand calculation.
+        idx = pd.date_range(group["month_date"].min(), last_month, freq="MS")
+        series = group.set_index("month_date")["units_sold"].reindex(idx, fill_value=0).astype(float)
+        recent = series.tail(3).to_numpy()
+        weights = np.arange(1, len(recent) + 1, dtype=float)
+        weighted_avg = float(np.average(recent, weights=weights)) if len(recent) else 0.0
+        trend = float(recent[-1] - recent[0]) / max(1, len(recent) - 1) if len(recent) >= 2 else 0.0
+        predicted = max(0, int(round(weighted_avg + 0.35 * trend)))
+
+        latest_rows = product_rows[product_rows["product_name"].astype(str) == str(product)]
+        latest_date = latest_rows["date"].max()
+        current_rows = latest_rows[latest_rows["date"] == latest_date]
+        stock = pd.to_numeric(current_rows.get("closing_stock", pd.Series(dtype=float)), errors="coerce").dropna()
+        closing_stock = float(stock.iloc[-1]) if not stock.empty else 0.0
+        cover_days = (closing_stock / (predicted / max(1, calendar_days(next_month.year, next_month.month)))) if predicted > 0 else 999.0
+        target_stock = int(math.ceil(predicted * 1.15))
+        reorder_qty = max(0, target_stock - int(round(closing_stock)))
+        if cover_days < 7 or (predicted > 0 and closing_stock < predicted * 0.25):
+            priority = "High"
+        elif cover_days < 15 or reorder_qty > 0:
+            priority = "Medium"
+        else:
+            priority = "Low"
+        rows.append({
+            "Product": str(product),
+            "Last Month Units Sold": int(series.iloc[-1]) if len(series) else 0,
+            f"Forecast Units · {next_month.strftime('%b %Y')}": predicted,
+            "Latest Closing Stock": int(round(closing_stock)),
+            "Stock Cover (Days)": round(cover_days, 1) if cover_days < 999 else None,
+            "Suggested Reorder Qty": reorder_qty,
+            "Restock Priority": priority,
+        })
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return
+    result = result.sort_values(
+        ["Restock Priority", f"Forecast Units · {next_month.strftime('%b %Y')}"],
+        ascending=[True, False],
+        key=lambda col: col.map({"High": 0, "Medium": 1, "Low": 2}) if col.name == "Restock Priority" else col,
+    )
+    st.markdown("### 🛒 Product Demand & Restocking Forecast")
+    st.caption(
+        f"Product-level estimate for {next_month.strftime('%B %Y')}, calculated from recent monthly units sold. "
+        "This is a planning estimate, not a guaranteed prediction."
+    )
+    st.dataframe(result, use_container_width=True, hide_index=True)
+    top = result.sort_values(f"Forecast Units · {next_month.strftime('%b %Y')}", ascending=False).head(5)
+    if not top.empty:
+        st.markdown("**Fast-moving products to watch:** " + ", ".join(top["Product"].astype(str).tolist()))
+    urgent = result[result["Restock Priority"] == "High"]
+    if not urgent.empty:
+        st.warning("Restock first: " + ", ".join(urgent["Product"].astype(str).tolist()))
+
+
+def calendar_days(year, month):
+    import calendar
+    return calendar.monthrange(year, month)[1]
+
+
 def data_import_page():
     page_header(
         "Data Import",
@@ -2412,7 +2771,7 @@ def data_import_page():
                     if suffix == ".csv":
                         imported_df = pd.read_csv(uploaded)
                     elif suffix in [".xlsx", ".xls"]:
-                        imported_df = pd.read_excel(uploaded)
+                        imported_df = _read_excel_financial_dataset(uploaded)
                     elif suffix == ".pdf":
                         imported_df = _read_pdf_dataset(uploaded)
                     else:
@@ -2656,22 +3015,7 @@ def data_import_page():
             st.markdown('<div class="section-title">3. Preview & Validate Dataset</div>', unsafe_allow_html=True)
             st.dataframe(imported_df, use_container_width=True, height=300, hide_index=True)
 
-            normalized = imported_df.copy()
-            normalized.columns = [str(column).strip().lower().replace(" ", "_") for column in normalized.columns]
-            rename_map = {}
-            for column in normalized.columns:
-                compact = column.replace("_", "")
-                if compact in ["transactiondate", "transaction_date"]:
-                    rename_map[column] = "date"
-                elif compact in ["details", "description", "particulars", "narration"]:
-                    rename_map[column] = "description"
-                elif compact in ["expensecategory", "category"]:
-                    rename_map[column] = "category"
-                elif compact in ["transactiontype", "type"]:
-                    rename_map[column] = "type"
-                elif compact in ["value", "amount", "transactionamount"]:
-                    rename_map[column] = "amount"
-            normalized = normalized.rename(columns=rename_map)
+            normalized = _canonicalize_import_columns(imported_df)
 
             required = {"date", "description", "category", "type", "amount"}
             missing = required - set(normalized.columns)
@@ -2699,8 +3043,16 @@ def data_import_page():
                 clean = normalized.dropna(subset=["date", "description", "category", "type", "amount"]).copy()
                 clean = clean[clean["type"].isin(["Income", "Expense"])].copy()
                 clean["amount"] = clean["amount"].abs()
+                # Preserve optional product/inventory columns so product-level forecasts
+                # still work after the transactions are saved to the user's dataset.
                 clean = clean.drop_duplicates(subset=["date", "description", "category", "type", "amount"]).copy()
-                clean = clean[["date", "description", "category", "type", "amount"]]
+                core_columns = ["date", "description", "category", "type", "amount"]
+                product_columns = [
+                    "product_name", "sku", "units_sold", "unit_selling_price",
+                    "unit_cost", "stock_received", "closing_stock", "stock_status", "supplier",
+                ]
+                keep_columns = core_columns + [col for col in product_columns if col in clean.columns]
+                clean = clean[keep_columns]
                 incoming_categories = _dataset_categories(clean)
 
                 st.write("")
@@ -2866,82 +3218,135 @@ def analytics_page(df):
 def forecast_page():
     page_header(
         "Forecast",
-        "Generate a next-month forecast from your own MoneyFlow transactions.",
+        "Forecast next month's income, expenses and profit using the signed-in user's latest transactions.",
     )
 
-    # Never display the global/demo historical CSV to users.
-    # A new account must start with a completely empty workspace.
+    # Reload directly from the active user's saved dataset on every page run.
     user_df = load_transactions()
-
     if user_df.empty:
         with st.container(border=True):
             st.markdown('<div class="section-title">📈 Your Forecast</div>', unsafe_allow_html=True)
-            st.info("No financial data yet. Add transactions or upload a receipt to generate your first forecast.")
+            st.info("No financial data yet. Add transactions or upload a file to generate your first forecast.")
         return
+
+    if st.button("🔄 Refresh forecast", key="refresh_forecast_button"):
+        st.rerun()
+
+    # Product demand forecasting is shown when imported data includes product-level sales.
+    _render_product_demand_forecast(user_df)
 
     monthly = monthly_data(user_df)
-    if len(monthly) < 3:
-        with st.container(border=True):
-            st.markdown('<div class="section-title">📈 Your Forecast</div>', unsafe_allow_html=True)
-            st.info("Add transactions covering at least 3 months to generate a meaningful forecast.")
+    if monthly.empty:
+        st.info("No monthly financial data could be calculated from these transactions.")
         return
 
-    history = monthly.rename(columns={"month": "month", "Income": "income", "Expense": "expenses"})[["month", "income", "expenses", "Profit"]].copy()
-    history["month"] = pd.to_datetime(history["month"] + "-01", errors="coerce")
-    history = history.rename(columns={"Profit": "profit"}).dropna().reset_index(drop=True)
+    # Add any missing calendar months so month-to-month changes are calculated correctly.
+    monthly = monthly.copy()
+    monthly["month_date"] = pd.to_datetime(monthly["month"].astype(str) + "-01", errors="coerce")
+    monthly = monthly.dropna(subset=["month_date"]).sort_values("month_date")
+    if monthly.empty:
+        st.info("The transaction dates could not be read. Check the dates in your Transactions page.")
+        return
+
+    full_months = pd.date_range(
+        monthly["month_date"].min().to_period("M").to_timestamp(),
+        monthly["month_date"].max().to_period("M").to_timestamp(),
+        freq="MS",
+    )
+    monthly = monthly.set_index("month_date").reindex(full_months, fill_value=0)
+    monthly.index.name = "month_date"
+    monthly["month"] = monthly.index.strftime("%Y-%m")
+    for col in ["Income", "Expense", "Profit"]:
+        if col not in monthly.columns:
+            monthly[col] = 0.0
+        monthly[col] = pd.to_numeric(monthly[col], errors="coerce").fillna(0.0)
+    monthly["Profit"] = monthly["Income"] - monthly["Expense"]
+    history = monthly.reset_index()[["month_date", "month", "Income", "Expense", "Profit"]].copy()
+    history = history.rename(columns={"Income": "income", "Expense": "expenses", "Profit": "profit"})
 
     with st.container(border=True):
         st.markdown('<div class="section-title">📊 Your Historical Financial Data</div>', unsafe_allow_html=True)
         display = history.assign(
-            month=history["month"].dt.strftime("%b %Y"),
+            month=history["month_date"].dt.strftime("%b %Y"),
             income=history["income"].map(money),
             expenses=history["expenses"].map(money),
             profit=history["profit"].map(money),
-        )
-        st.dataframe(display, width="stretch", hide_index=True)
+        )[["month", "income", "expenses", "profit"]]
+        st.dataframe(display, use_container_width=True, hide_index=True)
+
+    if len(history) < 3:
+        st.info("Add transactions covering at least 3 different calendar months to generate a forecast.")
+        return
+
+    latest = history.iloc[-1]
+    next_month = latest["month_date"] + pd.DateOffset(months=1)
+    method = "Recent monthly trend (limited history)"
 
     try:
-        from xgboost import XGBRegressor
+        # A tree model needs enough observations. With only 3–5 months, use a
+        # transparent trend baseline instead of training XGBoost on just 1–3 rows.
+        if len(history) >= 6:
+            from xgboost import XGBRegressor
 
-        data = history.copy()
-        data["year"] = data["month"].dt.year
-        data["month_number"] = data["month"].dt.month
-        data["income_lag_1"] = data["income"].shift(1)
-        data["expenses_lag_1"] = data["expenses"].shift(1)
-        data["profit_lag_1"] = data["profit"].shift(1)
-        train = data.dropna().copy()
+            data = history.copy()
+            data["year"] = data["month_date"].dt.year
+            data["month_number"] = data["month_date"].dt.month
+            for col in ["income", "expenses", "profit"]:
+                data[f"{col}_lag_1"] = data[col].shift(1)
+                data[f"{col}_lag_2"] = data[col].shift(2)
+            features = [
+                "year", "month_number", "income_lag_1", "income_lag_2",
+                "expenses_lag_1", "expenses_lag_2", "profit_lag_1", "profit_lag_2",
+            ]
+            train = data.dropna(subset=features + ["income", "expenses"])
+            if len(train) >= 4:
+                models = {}
+                for target in ["income", "expenses"]:
+                    model = XGBRegressor(
+                        n_estimators=120,
+                        max_depth=2,
+                        learning_rate=0.04,
+                        objective="reg:squarederror",
+                        random_state=42,
+                    )
+                    model.fit(train[features], train[target])
+                    models[target] = model
+                future = pd.DataFrame([{
+                    "year": next_month.year,
+                    "month_number": next_month.month,
+                    "income_lag_1": latest["income"],
+                    "income_lag_2": history.iloc[-2]["income"],
+                    "expenses_lag_1": latest["expenses"],
+                    "expenses_lag_2": history.iloc[-2]["expenses"],
+                    "profit_lag_1": latest["profit"],
+                    "profit_lag_2": history.iloc[-2]["profit"],
+                }], columns=features)
+                predicted_income = max(0.0, float(models["income"].predict(future)[0]))
+                predicted_expenses = max(0.0, float(models["expenses"].predict(future)[0]))
+                method = "XGBoost regression with two-month lag features"
+            else:
+                predicted_income = predicted_expenses = None
+        else:
+            predicted_income = predicted_expenses = None
 
-        if len(train) < 2:
-            st.info("Add more monthly transaction data before forecasting.")
-            return
+        if predicted_income is None or predicted_expenses is None:
+            # Use the last 3 month-to-month changes, weighted toward recent months.
+            # This reacts immediately when the user adds or edits transactions.
+            def trend_prediction(column):
+                values = history[column].astype(float).to_numpy()
+                last_value = float(values[-1])
+                changes = np.diff(values)[-3:]
+                if len(changes) == 0:
+                    return max(0.0, last_value)
+                weights = np.arange(1, len(changes) + 1, dtype=float)
+                weighted_change = float(np.average(changes, weights=weights))
+                # Blend the recent level and trend to avoid extreme jumps on tiny datasets.
+                return max(0.0, last_value + weighted_change)
 
-        features = ["year", "month_number", "income_lag_1", "expenses_lag_1", "profit_lag_1"]
-        models = {}
-        for target in ["income", "expenses"]:
-            model = XGBRegressor(
-                n_estimators=100,
-                max_depth=3,
-                learning_rate=0.05,
-                objective="reg:squarederror",
-                random_state=42,
-            )
-            model.fit(train[features], train[target])
-            models[target] = model
+            predicted_income = trend_prediction("income")
+            predicted_expenses = trend_prediction("expenses")
 
-        latest = data.iloc[-1]
-        next_month = latest["month"] + pd.DateOffset(months=1)
-        future = pd.DataFrame([{
-            "year": next_month.year,
-            "month_number": next_month.month,
-            "income_lag_1": latest["income"],
-            "expenses_lag_1": latest["expenses"],
-            "profit_lag_1": latest["profit"],
-        }])
-
-        predicted_income = max(0, float(models["income"].predict(future)[0]))
-        predicted_expenses = max(0, float(models["expenses"].predict(future)[0]))
         predicted_profit = predicted_income - predicted_expenses
-
         p1, p2, p3 = st.columns(3)
         p1.metric(f"Predicted Income · {next_month.strftime('%b %Y')}", money(predicted_income))
         p2.metric("Predicted Expenses", money(predicted_expenses))
@@ -2957,7 +3362,10 @@ def forecast_page():
                 f'<b>{forecast_margin:.1f}%</b>.</div>',
                 unsafe_allow_html=True,
             )
-            st.caption("Forecast is calculated from the signed-in user's own transaction history. It is an estimate, not a guaranteed financial result.")
+            st.caption(
+                f"Forecast method: {method}. Based on {len(history)} calendar months of the signed-in user's saved transactions. "
+                "This is an estimate, not a guaranteed financial result."
+            )
 
     except Exception as error:
         st.error(f"Forecast model could not run: {error}")
