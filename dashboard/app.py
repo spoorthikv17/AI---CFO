@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
+
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -1349,8 +1350,13 @@ def page_header(title, subtitle):
 
 def _voice_ai_cfo_question(audio_bytes, language, financial_context):
     """Convert a recorded English/Kannada question into an AI CFO answer."""
+    import sys
+    print("VOICE PYTHON:", sys.executable, flush=True)
+
     from google import genai
     from google.genai import types
+
+    print("VOICE AI IMPORTS: SUCCESS")
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1420,135 +1426,68 @@ For Kannada, use Kannada script rather than transliterated English.
 
 
 def _render_cfo_speech(response, is_kannada=False):
-    """Render reliable browser speech controls and clean the answer before speaking."""
-    import streamlit.components.v1 as components
+    """Generate and display AI CFO speech with a persistent audio player."""
+    import asyncio
+    import streamlit as st
 
-    answer_json = json.dumps(str(response or ""), ensure_ascii=False)
-    language_code = "kn-IN" if is_kannada else "en-IN"
+    answer = str(response or "").strip()
+    if not answer:
+        st.warning("No answer is available to speak.")
+        return
+
     listen_label = "🔊 ಉತ್ತರವನ್ನು ಕೇಳಿ" if is_kannada else "🔊 Listen to AI CFO answer"
-    stop_label = "⏹️ ನಿಲ್ಲಿಸಿ" if is_kannada else "⏹️ Stop speaking"
-    unavailable_message = (
-        "ಈ ಬ್ರೌಸರ್‌ನಲ್ಲಿ ಕನ್ನಡ ಧ್ವನಿ ಲಭ್ಯವಿಲ್ಲ."
-        if is_kannada
-        else "Speech is unavailable in this browser. Try Chrome or Edge."
-    )
-    labels_json = json.dumps(
-        {"listen": listen_label, "stop": stop_label, "unavailable": unavailable_message,
-         "loading": "Preparing voice…" if not is_kannada else "ಧ್ವನಿಯನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗುತ್ತಿದೆ…"},
-        ensure_ascii=False,
-    )
+    voice_name = "kn-IN-SapnaNeural" if is_kannada else "en-IN-NeerjaNeural"
+    answer_key = hashlib.sha256((voice_name + answer).encode("utf-8")).hexdigest()
 
-    # Use a plain JS template and replace tokens so JavaScript regex braces are not
-    # accidentally interpreted by Python f-string formatting.
-    html = r"""<!doctype html>
-<html><meta charset="utf-8"><body style="margin:0;font-family:Arial,sans-serif">
-<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-  <button id="mf-speak" style="border:0;border-radius:10px;padding:10px 16px;cursor:pointer;font-weight:600">__LISTEN__</button>
-  <button id="mf-stop" style="border:0;border-radius:10px;padding:10px 16px;cursor:pointer">__STOP__</button>
-  <span id="mf-speech-status" style="font:13px sans-serif"></span>
-</div>
-<script>
-(() => {
-  const rawAnswer = __ANSWER__;
-  const lang = __LANG__;
-  const labels = __LABELS__;
-  const status = document.getElementById('mf-speech-status');
-  const speakButton = document.getElementById('mf-speak');
-  const stopButton = document.getElementById('mf-stop');
+    if st.session_state.get("mf_speech_answer_key") != answer_key:
+        st.session_state.pop("mf_speech_audio", None)
+        st.session_state["mf_speech_answer_key"] = answer_key
 
-  function cleanForSpeech(value) {
-    let text = String(value || '');
-    text = text.replace(/```[\s\S]*?```/g, ' ');
-    text = text.replace(/`([^`]*)`/g, '$1');
-    text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
-    text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-    text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
-    text = text.replace(/^\s*[-*+]\s+/gm, '');
-    text = text.replace(/^\s*\d+[.)]\s+/gm, '');
-    text = text.replace(/\*\*(.*?)\*\*/g, '$1');
-    text = text.replace(/__(.*?)__/g, '$1');
-    text = text.replace(/~~(.*?)~~/g, '$1');
-    text = text.replace(/₹\s?(?=[\d])/g, ' rupees ');
-    text = text.replace(/\bINR\b/gi, ' rupees ');
-    text = text.replace(/(?<=\d),(?=\d)/g, '');
-    text = text.replace(/%(?=\s|$|[.,])/g, ' percent');
-    text = text.replace(/&/g, ' and ');
-    text = text.replace(/[\*_~#>|]/g, ' ');
-    text = text.replace(/[=]+/g, ' ');
-    text = text.replace(/\s+/g, ' ').trim();
-    return text;
-  }
+    if st.button(listen_label, key="mf_generate_cfo_speech"):
+        try:
+            import edge_tts
 
-  function getVoices() {
-    return new Promise(resolve => {
-      let voices = window.speechSynthesis.getVoices();
-      if (voices.length) return resolve(voices);
-      let finished = false;
-      const done = () => {
-        if (finished) return;
-        finished = true;
-        window.speechSynthesis.removeEventListener('voiceschanged', changed);
-        resolve(window.speechSynthesis.getVoices());
-      };
-      const changed = () => done();
-      window.speechSynthesis.addEventListener('voiceschanged', changed);
-      setTimeout(done, 1200);
-    });
-  }
+            async def generate_audio():
+                communicator = edge_tts.Communicate(answer, voice_name, rate="+0%")
+                audio = bytearray()
+                async for chunk in communicator.stream():
+                    if chunk.get("type") == "audio":
+                        audio.extend(chunk["data"])
+                return bytes(audio)
 
-  speakButton.addEventListener('click', async () => {
-    if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {
-      status.textContent = labels.unavailable;
-      return;
-    }
-    const answer = cleanForSpeech(rawAnswer);
-    if (!answer) { status.textContent = labels.unavailable; return; }
-    window.speechSynthesis.cancel();
-    status.textContent = labels.loading;
-    const voices = await getVoices();
-    const prefix = lang.split('-')[0].toLowerCase();
-    const voice = voices.find(v => v.lang.toLowerCase() === lang.toLowerCase())
-      || voices.find(v => v.lang.toLowerCase().startsWith(prefix));
-    if (lang.startsWith('kn') && !voice) {
-      status.textContent = labels.unavailable;
-      return;
-    }
-    // Split long answers into short utterances for browsers that stop long speech.
-    const chunks = answer.match(/[^.!?।]+[.!?।]*/g) || [answer];
-    const queue = chunks.map(part => part.trim()).filter(Boolean);
-    if (!queue.length) { status.textContent = labels.unavailable; return; }
-    let index = 0;
-    const speakNext = () => {
-      if (index >= queue.length) { status.textContent = ''; return; }
-      const utterance = new SpeechSynthesisUtterance(queue[index++]);
-      utterance.lang = lang;
-      utterance.rate = 0.92;
-      utterance.pitch = 1;
-      if (voice) utterance.voice = voice;
-      utterance.onend = speakNext;
-      utterance.onerror = () => { status.textContent = labels.unavailable; };
-      window.speechSynthesis.speak(utterance);
-    };
-    status.textContent = '';
-    speakNext();
-  });
-  stopButton.addEventListener('click', () => {
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    status.textContent = '';
-  });
-})();
-</script></body></html>"""
-    html = (html.replace('__LISTEN__', listen_label)
-                .replace('__STOP__', stop_label)
-                .replace('__ANSWER__', answer_json)
-                .replace('__LANG__', json.dumps(language_code))
-                .replace('__LABELS__', labels_json))
-    components.html(html, height=64, scrolling=False)
+            with st.spinner(
+                "ಕನ್ನಡ ಧ್ವನಿಯನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗುತ್ತಿದೆ…" if is_kannada
+                else "Preparing AI CFO voice…"
+            ):
+                audio_bytes = asyncio.run(generate_audio())
+
+            if not audio_bytes:
+                raise RuntimeError("The speech service returned empty audio.")
+
+            st.session_state["mf_speech_audio"] = audio_bytes
+
+        except ImportError:
+            st.error(r"Voice package missing. Run: .\venv\Scripts\python.exe -m pip install edge-tts")
+        except Exception as error:
+            st.error(f"Could not generate speech: {error}")
+
+    # Keep the player visible after Streamlit reruns. Autoplay is intentionally
+    # disabled because desktop WebView/browser policies can block generated audio.
+    saved_audio = st.session_state.get("mf_speech_audio")
+    if saved_audio and st.session_state.get("mf_speech_answer_key") == answer_key:
+        st.audio(saved_audio, format="audio/mpeg", autoplay=False)
+        st.caption(
+            "Click ▶ on the audio player to listen. Microsoft neural Kannada voice."
+            if is_kannada
+            else "Click ▶ on the audio player to listen. Microsoft neural English voice."
+        )
 
 
 def _clear_cfo_voice_input():
-    """Clear the recorded voice question from the Streamlit audio widget."""
-    st.session_state.pop("cfo_voice_input", None)
+    """Reset the recorder by giving the widget a fresh session-state key."""
+    st.session_state["cfo_voice_widget_version"] = (
+        st.session_state.get("cfo_voice_widget_version", 0) + 1
+    )
 
 
 def cfo_inside_dashboard(df):
@@ -1640,11 +1579,13 @@ Largest expense amount: ₹{top_amount:,.2f}
         st.caption("English voice: Click the microphone and ask your financial question.")
 
     audio_value = None
+    voice_widget_version = st.session_state.get("cfo_voice_widget_version", 0)
+    voice_widget_key = f"cfo_voice_input_{voice_widget_version}"
 
     try:
         audio_value = st.audio_input(
             "🎙️ Record your question",
-            key="cfo_voice_input",
+            key=voice_widget_key,
         )
     except AttributeError:
         st.warning(
@@ -1766,7 +1707,8 @@ Largest expense amount: ₹{top_amount:,.2f}
                     f'</b><br><br>{response}</div>',
                     unsafe_allow_html=True,
                 )
-                _render_cfo_speech(response, is_kannada)
+                st.session_state["mf_cfo_last_answer"] = response
+                st.session_state["mf_cfo_last_language"] = is_kannada
 
             except Exception as error:
                 st.error(
@@ -1826,7 +1768,8 @@ User question:
                     f'</b><br><br>{response}</div>',
                     unsafe_allow_html=True,
                 )
-                _render_cfo_speech(response, is_kannada)
+                st.session_state["mf_cfo_last_answer"] = response
+                st.session_state["mf_cfo_last_language"] = is_kannada
 
             except Exception:
 
@@ -1933,7 +1876,16 @@ User question:
                     f'</b><br><br>{fallback}</div>',
                     unsafe_allow_html=True,
                 )
-                _render_cfo_speech(fallback, is_kannada)
+                st.session_state["mf_cfo_last_answer"] = fallback
+                st.session_state["mf_cfo_last_language"] = is_kannada
+
+    # Persist the answer and voice player across Streamlit reruns.
+    saved_cfo_answer = st.session_state.get("mf_cfo_last_answer")
+    if saved_cfo_answer:
+        _render_cfo_speech(
+            saved_cfo_answer,
+            st.session_state.get("mf_cfo_last_language", is_kannada),
+        )
 
 def get_time_greeting():
     """Return a greeting based on the user's local time."""
@@ -2418,46 +2370,55 @@ def _canonicalize_import_columns(frame):
 
 
 def _read_excel_financial_dataset(uploaded_file):
-    """Read the best matching workbook sheet; convert shop Daily_Sales when needed."""
+    """Read only the relevant workbook sheets to keep Excel import fast."""
     uploaded_file.seek(0)
     workbook = pd.ExcelFile(uploaded_file)
-    sheets = {}
+    header_map = {}
+
+    # Inspect headers only first. Avoid loading every sheet's thousands of rows.
     for sheet_name in workbook.sheet_names:
         try:
-            raw = pd.read_excel(workbook, sheet_name=sheet_name)
-            if not raw.empty:
-                sheets[sheet_name] = _canonicalize_import_columns(raw)
+            header_frame = _canonicalize_import_columns(
+                pd.read_excel(workbook, sheet_name=sheet_name, nrows=0)
+            )
+            header_map[sheet_name] = set(header_frame.columns)
         except Exception:
             continue
 
     required = {"date", "description", "category", "type", "amount"}
-    # Prefer a real transaction sheet, rather than a Read_Me/instructions sheet.
-    preferred_names = ["Transactions", "transactions", "Transaction", "transaction"]
-    ordered_names = sorted(sheets, key=lambda n: (0 if n in preferred_names else 1, list(sheets).index(n)))
-    for sheet_name in ordered_names:
-        frame = sheets[sheet_name]
-        if required.issubset(set(frame.columns)):
-            return frame
-
-    # If this is the original shop workbook, convert product daily sales to transactions
-    # and include shop expenses so the financial dashboard can import it too.
-    daily = None
-    for sheet_name, frame in sheets.items():
-        cols = set(frame.columns)
-        if {"date", "product_name", "units_sold"}.issubset(cols) and (
-            "sales_revenue_inr" in cols or "amount" in cols
-        ):
-            daily = frame.copy()
-            break
-
-    if daily is None:
-        available = "; ".join(f"{name}: {', '.join(map(str, frame.columns[:8]))}" for name, frame in sheets.items())
-        raise ValueError(
-            "Could not find a Transactions sheet or a Daily_Sales sheet in this workbook. "
-            "Expected columns date, description, category, type, amount. "
-            f"Sheets found: {available or 'none'}"
+    transaction_candidates = [
+        name for name in workbook.sheet_names
+        if name in header_map and required.issubset(header_map[name])
+    ]
+    transaction_candidates.sort(
+        key=lambda name: (0 if name.strip().lower() in {"transactions", "transaction"} else 1)
+    )
+    if transaction_candidates:
+        selected = transaction_candidates[0]
+        return _canonicalize_import_columns(
+            pd.read_excel(workbook, sheet_name=selected)
         )
 
+    # Shop dataset: load only Daily_Sales and Shop_Expenses, not every workbook tab.
+    daily_candidates = [
+        name for name, cols in header_map.items()
+        if {"date", "product_name", "units_sold"}.issubset(cols)
+        and ("sales_revenue_inr" in cols or "amount" in cols)
+    ]
+    if not daily_candidates:
+        available = "; ".join(
+            f"{name}: {', '.join(sorted(cols)[:8])}"
+            for name, cols in header_map.items()
+        )
+        raise ValueError(
+            "Could not find a Transactions sheet or a Daily_Sales sheet. "
+            "Expected date, description, category, type, amount, or product-level "
+            f"sales columns. Sheets found: {available or 'none'}"
+        )
+
+    daily = _canonicalize_import_columns(
+        pd.read_excel(workbook, sheet_name=daily_candidates[0])
+    )
     revenue_col = "sales_revenue_inr" if "sales_revenue_inr" in daily.columns else "amount"
     daily_transactions = pd.DataFrame({
         "date": daily["date"],
@@ -2466,6 +2427,7 @@ def _read_excel_financial_dataset(uploaded_file):
         "type": "Income",
         "amount": daily[revenue_col],
     })
+
     optional_map = {
         "product_name": "product_name", "sku": "sku", "units_sold": "units_sold",
         "unit_selling_price": "unit_selling_price", "stock_received": "stock_received",
@@ -2475,16 +2437,15 @@ def _read_excel_financial_dataset(uploaded_file):
         if source in daily.columns:
             daily_transactions[target] = daily[source].values
 
-    expenses = None
-    for sheet_name, frame in sheets.items():
-        cols = set(frame.columns)
-        if {"date", "expense_name", "amount_inr"}.issubset(cols):
-            expenses = frame.copy()
-            break
-        if {"date", "expense_name", "amount"}.issubset(cols):
-            expenses = frame.copy()
-            break
-    if expenses is not None:
+    expense_candidates = [
+        name for name, cols in header_map.items()
+        if {"date", "expense_name"}.issubset(cols)
+        and ("amount_inr" in cols or "amount" in cols)
+    ]
+    if expense_candidates:
+        expenses = _canonicalize_import_columns(
+            pd.read_excel(workbook, sheet_name=expense_candidates[0])
+        )
         exp_amount_col = "amount_inr" if "amount_inr" in expenses.columns else "amount"
         exp = pd.DataFrame({
             "date": expenses["date"],
@@ -2495,6 +2456,13 @@ def _read_excel_financial_dataset(uploaded_file):
         })
         daily_transactions = pd.concat([daily_transactions, exp], ignore_index=True, sort=False)
     return daily_transactions
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _read_excel_financial_dataset_cached(file_bytes):
+    """Cache parsed workbooks by their bytes to avoid repeating Excel parsing on reruns."""
+    from io import BytesIO
+    return _read_excel_financial_dataset(BytesIO(file_bytes))
 
 
 def _render_product_demand_forecast(transactions):
@@ -2519,6 +2487,16 @@ def _render_product_demand_forecast(transactions):
         return
     last_month = monthly["month_date"].max()
     next_month = last_month + pd.DateOffset(months=1)
+
+    # Precompute each product's most recent stock row once instead of rescanning
+    # the entire daily dataset for every product.
+    latest_rows = (
+        product_rows.sort_values("date")
+        .groupby(product_rows["product_name"].astype(str), sort=False)
+        .tail(1)
+    )
+    latest_stock_rows = latest_rows.set_index(latest_rows["product_name"].astype(str), drop=False)
+
     rows = []
     for product, group in monthly.groupby("product_name"):
         group = group.sort_values("month_date")
@@ -2531,11 +2509,12 @@ def _render_product_demand_forecast(transactions):
         trend = float(recent[-1] - recent[0]) / max(1, len(recent) - 1) if len(recent) >= 2 else 0.0
         predicted = max(0, int(round(weighted_avg + 0.35 * trend)))
 
-        latest_rows = product_rows[product_rows["product_name"].astype(str) == str(product)]
-        latest_date = latest_rows["date"].max()
-        current_rows = latest_rows[latest_rows["date"] == latest_date]
-        stock = pd.to_numeric(current_rows.get("closing_stock", pd.Series(dtype=float)), errors="coerce").dropna()
-        closing_stock = float(stock.iloc[-1]) if not stock.empty else 0.0
+        current_row = latest_stock_rows.loc[str(product)] if str(product) in latest_stock_rows.index else None
+        if current_row is not None and "closing_stock" in current_row.index:
+            stock_value = pd.to_numeric(pd.Series([current_row.get("closing_stock")]), errors="coerce").iloc[0]
+            closing_stock = float(stock_value) if pd.notna(stock_value) else 0.0
+        else:
+            closing_stock = 0.0
         cover_days = (closing_stock / (predicted / max(1, calendar_days(next_month.year, next_month.month)))) if predicted > 0 else 999.0
         target_stock = int(math.ceil(predicted * 1.15))
         reorder_qty = max(0, target_stock - int(round(closing_stock)))
@@ -2771,7 +2750,7 @@ def data_import_page():
                     if suffix == ".csv":
                         imported_df = pd.read_csv(uploaded)
                     elif suffix in [".xlsx", ".xls"]:
-                        imported_df = _read_excel_financial_dataset(uploaded)
+                        imported_df = _read_excel_financial_dataset_cached(uploaded.getvalue())
                     elif suffix == ".pdf":
                         imported_df = _read_pdf_dataset(uploaded)
                     else:
@@ -3642,6 +3621,3 @@ if not st.session_state.logged_in:
     login_page()
 else:
     main_app()
-
-
-

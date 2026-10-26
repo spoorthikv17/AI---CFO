@@ -1,6 +1,28 @@
-venv/
+# Private user data
+/data/users/
+/data/users.json
+/data/device_sessions.json
+
+# Generated builds
+/build/
+/dist/
+/debug_build/
+/debug_output/
+/output/
+/temp_build/
+
+# Desktop packaging files
+*.spec
+*.ico
+*.lnk
+*.bat
+
+# Python
 __pycache__/
 *.pyc
+venv/
+
+# Secrets
 .env
-.ipynb_checkpoints/
-.vscode/
+.env.*
+!.env.example
