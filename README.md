@@ -178,6 +178,19 @@ Through this project, I explored:
 * Improved financial reporting.
 * Additional intelligent financial insights.
 
+## 📸 Application Preview
+
+Explore the complete MoneyFlow dashboard, including:
+
+- Financial Overview
+- Income & Expense Analytics
+- Financial Health Score
+- AI CFO Insights
+- AI-powered Financial Analysis
+- Recent Transactions
+
+📄 **[View Complete Dashboard PDF](MoneyFlow.pdf)**
+
 ## 👩‍💻 Developer
 
 **Spoorthi K V**
