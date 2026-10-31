@@ -1,4 +1,4 @@
-# 💰 AI CFO – Intelligent Financial Management System
+#             💰 AI CFO – Intelligent Financial Management System
 
 <p align="center">
   <b>An AI-powered financial decision support application for smarter business decisions.</b>
